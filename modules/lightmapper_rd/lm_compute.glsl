@@ -10,7 +10,7 @@ pack_coeffs = "#define MODE_PACK_L1_COEFFS";
 
 #[compute]
 
-#version 450
+#version 460
 
 #VERSION_DEFINES
 
@@ -134,6 +134,128 @@ const uint RAY_MISS = 0;
 const uint RAY_FRONT = 1;
 const uint RAY_BACK = 2;
 const uint RAY_ANY = 3;
+
+#ifdef USE_HW_RAYTRACING
+
+// Matches the winding convention the software tracer uses to classify front and back faces.
+vec3 triangle_geometric_normal(uint p_triangle) {
+	vec3 vtx0 = vertices.data[triangles.data[p_triangle].indices.x].position;
+	vec3 vtx1 = vertices.data[triangles.data[p_triangle].indices.y].position;
+	vec3 vtx2 = vertices.data[triangles.data[p_triangle].indices.z].position;
+	return -normalize(cross((vtx0 - vtx1), (vtx0 - vtx2)));
+}
+
+// The software tracer pulls front faces one bias towards the ray origin so that a front face always
+// wins over a back face lying in the same plane, which happens whenever a surface is modelled as two
+// coincident single sided faces. Hardware traversal reports the true closest hit instead, so when
+// that hit is a back face the thin shell just past it is rescanned for the front face the software
+// tracer would have picked. Only back face hits pay for this.
+bool find_coplanar_front_face(vec3 p_from, vec3 p_dir, float p_from_distance, float p_to_distance, out uint r_triangle, out float r_distance, out vec3 r_barycentric, out vec3 r_normal) {
+	if (p_to_distance <= p_from_distance) {
+		return false;
+	}
+
+	rayQueryEXT ray_query;
+	// Forcing non opaque reports every intersection as a candidate so they can all be examined.
+	rayQueryInitializeEXT(ray_query, scene_tlas, gl_RayFlagsNoOpaqueEXT, 0xFF, p_from, p_from_distance, p_dir, p_to_distance);
+
+	bool found = false;
+	float best_distance = 1e20;
+	while (rayQueryProceedEXT(ray_query)) {
+		if (rayQueryGetIntersectionTypeEXT(ray_query, false) != gl_RayQueryCandidateIntersectionTriangleEXT) {
+			continue;
+		}
+
+		uint triangle_index = rayQueryGetIntersectionPrimitiveIndexEXT(ray_query, false);
+		vec3 normal = triangle_geometric_normal(triangle_index);
+		if (dot(normal, p_dir) >= 0.0) {
+			// Another back face, the caller already has a closer one.
+			continue;
+		}
+
+		float distance = rayQueryGetIntersectionTEXT(ray_query, false);
+		if (distance < best_distance) {
+			vec2 candidate_barycentric = rayQueryGetIntersectionBarycentricsEXT(ray_query, false);
+			best_distance = distance;
+			r_triangle = triangle_index;
+			r_distance = distance;
+			r_barycentric = vec3(1.0 - candidate_barycentric.x - candidate_barycentric.y, candidate_barycentric.x, candidate_barycentric.y);
+			r_normal = normal;
+			found = true;
+		}
+	}
+
+	return found;
+}
+
+uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, out float r_distance, out vec3 r_normal, out uint r_triangle, out vec3 r_barycentric) {
+	vec3 rel = p_to - p_from;
+	float rel_len = length(rel);
+	if (rel_len <= bake_params.bias) {
+		return RAY_MISS;
+	}
+
+	vec3 dir = rel / rel_len;
+
+	uint ray_flags = gl_RayFlagsOpaqueEXT;
+	if (p_any_hit) {
+		ray_flags |= gl_RayFlagsTerminateOnFirstHitEXT;
+	}
+
+	rayQueryEXT ray_query;
+	rayQueryInitializeEXT(ray_query, scene_tlas, ray_flags, 0xFF, p_from, bake_params.bias, dir, rel_len);
+	while (rayQueryProceedEXT(ray_query)) {
+	}
+
+	if (rayQueryGetIntersectionTypeEXT(ray_query, true) == gl_RayQueryCommittedIntersectionNoneEXT) {
+		return RAY_MISS;
+	}
+
+	if (p_any_hit) {
+		// The software tracer reports any hit without classifying or culling it.
+		return RAY_ANY;
+	}
+
+	uint triangle_index = rayQueryGetIntersectionPrimitiveIndexEXT(ray_query, true);
+	float distance = rayQueryGetIntersectionTEXT(ray_query, true);
+	vec2 committed_barycentric = rayQueryGetIntersectionBarycentricsEXT(ray_query, true);
+	vec3 barycentric = vec3(1.0 - committed_barycentric.x - committed_barycentric.y, committed_barycentric.x, committed_barycentric.y);
+	vec3 normal = triangle_geometric_normal(triangle_index);
+	bool backface = dot(normal, dir) >= 0.0;
+
+	if (backface) {
+		uint front_triangle;
+		float front_distance;
+		vec3 front_barycentric;
+		vec3 front_normal;
+		if (find_coplanar_front_face(p_from, dir, distance, min(distance + bake_params.bias, rel_len), front_triangle, front_distance, front_barycentric, front_normal)) {
+			triangle_index = front_triangle;
+			distance = front_distance;
+			barycentric = front_barycentric;
+			normal = front_normal;
+			backface = false;
+		}
+	}
+
+	switch (triangles.data[triangle_index].cull_mode) {
+		case CULL_DISABLED:
+			backface = false;
+			break;
+		case CULL_FRONT:
+			backface = !backface;
+			break;
+		case CULL_BACK: // Default behavior.
+			break;
+	}
+
+	r_distance = distance;
+	r_normal = normal;
+	r_triangle = triangle_index;
+	r_barycentric = barycentric;
+	return backface ? RAY_BACK : RAY_FRONT;
+}
+
+#else
 
 bool ray_box_test(vec3 p_from, vec3 p_inv_dir, vec3 p_box_min, vec3 p_box_max) {
 	vec3 t0 = (p_box_min - p_from) * p_inv_dir;
@@ -307,6 +429,8 @@ uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, out float r_distance, out
 
 	return RAY_MISS;
 }
+
+#endif // USE_HW_RAYTRACING
 
 uint trace_ray_closest_hit_triangle(vec3 p_from, vec3 p_to, out uint r_triangle, out vec3 r_barycentric) {
 	float distance;

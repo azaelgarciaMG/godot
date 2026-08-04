@@ -3096,6 +3096,10 @@
 			The region size to use when baking lightmaps with [LightmapGI]. The specified value is rounded up to the nearest power of 2.
 			[b]Note:[/b] Using a value that is too high for your system can cause crashes due to the GPU being unresponsive for long periods of time, and the graphics driver being reset by the OS.
 		</member>
+		<member name="rendering/lightmapping/bake_performance/use_hardware_raytracing" type="bool" setter="" getter="" default="true">
+			If [code]true[/code], [LightmapGI] bakes trace rays against a hardware acceleration structure instead of walking a uniform voxel grid, which is significantly faster on GPUs that support it. This also skips building the grid, shortening the preparation step of the bake.
+			[b]Note:[/b] This has no effect on GPUs without ray query support, which always fall back to the voxel grid.
+		</member>
 		<member name="rendering/lightmapping/bake_quality/high_quality_probe_ray_count" type="int" setter="" getter="" default="512">
 			The number of rays to use for baking dynamic object lighting in [LightmapProbe]s when [member LightmapGI.quality] is [constant LightmapGI.BAKE_QUALITY_HIGH].
 		</member>

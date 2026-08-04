@@ -251,6 +251,68 @@ void LightmapperRD::_plot_triangle_into_triangle_index_list(int p_size, const Ve
 	}
 }
 
+bool LightmapperRD::_build_raytracing_structures(RenderingDevice *p_rd, const LocalVector<Vertex> &p_vertex_array, const LocalVector<Triangle> &p_triangles, RaytracingStructures &r_structures) {
+	// The acceleration structure build reads positions straight out of a copy of the vertex array,
+	// so the tracer's Vertex stride is reused as-is and only the leading position is described.
+	// Indices are laid out in triangle buffer order, which makes the primitive index reported by a
+	// ray query double as the index into the triangle buffer.
+	LocalVector<uint32_t> indices;
+	indices.resize(p_triangles.size() * 3);
+	for (uint32_t i = 0; i < p_triangles.size(); i++) {
+		indices[i * 3 + 0] = p_triangles[i].indices[0];
+		indices[i * 3 + 1] = p_triangles[i].indices[1];
+		indices[i * 3 + 2] = p_triangles[i].indices[2];
+	}
+
+	const BitField<RD::BufferCreationBits> build_input_bits =
+			RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT;
+
+	r_structures.vertex_buffer = p_rd->vertex_buffer_create(p_vertex_array.size() * sizeof(Vertex), p_vertex_array.span().reinterpret<uint8_t>(), build_input_bits);
+	ERR_FAIL_COND_V(r_structures.vertex_buffer.is_null(), false);
+
+	r_structures.index_buffer = p_rd->index_buffer_create(indices.size(), RD::INDEX_BUFFER_FORMAT_UINT32, indices.span().reinterpret<uint8_t>(), false, build_input_bits);
+	ERR_FAIL_COND_V(r_structures.index_buffer.is_null(), false);
+
+	RD::AccelerationStructureGeometry geometry;
+	geometry.flags = RD::ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT;
+	geometry.vertex_buffer = r_structures.vertex_buffer;
+	geometry.vertex_offset = 0;
+	geometry.vertex_stride = sizeof(Vertex);
+	geometry.vertex_count = p_vertex_array.size();
+	geometry.vertex_format = RD::DATA_FORMAT_R32G32B32_SFLOAT;
+	geometry.index_buffer = r_structures.index_buffer;
+	geometry.index_offset = 0;
+	geometry.index_count = indices.size();
+
+	r_structures.blas = p_rd->blas_create(Span<RD::AccelerationStructureGeometry>(&geometry, 1), RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT);
+	ERR_FAIL_COND_V(r_structures.blas.is_null(), false);
+	ERR_FAIL_COND_V(p_rd->blas_build(r_structures.blas) != OK, false);
+
+	r_structures.tlas = p_rd->tlas_create(1, RD::ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT);
+	ERR_FAIL_COND_V(r_structures.tlas.is_null(), false);
+
+	RD::AccelerationStructureInstance instance;
+	instance.transform = Transform3D();
+	instance.id = 0;
+	instance.mask = 0xFF;
+	// No hit groups: the structure is only ever traced with ray queries, which do not run hit
+	// shaders and have no shader binding table to point into.
+	instance.hit_sbt_range = 0;
+	// The tracer classifies faces itself from the geometric normal and applies the per-triangle cull
+	// mode after the hit, so traversal must not discard anything.
+	instance.flags = RD::ACCELERATION_STRUCTURE_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT;
+	instance.blas = r_structures.blas;
+
+	ERR_FAIL_COND_V(p_rd->tlas_build(r_structures.tlas, Span<RD::AccelerationStructureInstance>(&instance, 1)) != OK, false);
+
+	// Both builds are recorded into the draw graph, so flush them before anything traces against it.
+	p_rd->submit();
+	p_rd->sync();
+
+	r_structures.built = true;
+	return true;
+}
+
 void LightmapperRD::_sort_triangle_clusters(uint32_t p_cluster_size, uint32_t p_cluster_index, uint32_t p_index_start, uint32_t p_count, LocalVector<TriangleSort> &p_triangle_sort, LocalVector<ClusterAABB> &p_cluster_aabb) {
 	if (p_count == 0) {
 		return;
@@ -432,7 +494,7 @@ Lightmapper::BakeError LightmapperRD::_blit_meshes_into_atlas(int p_max_texture_
 	return BAKE_OK;
 }
 
-void LightmapperRD::_create_acceleration_structures(RenderingDevice *rd, Size2i atlas_size, int atlas_slices, AABB &bounds, int grid_size, uint32_t p_cluster_size, Vector<Probe> &p_probe_positions, GenerateProbes p_generate_probes, Vector<int> &slice_triangle_count, Vector<int> &slice_seam_count, RID &vertex_buffer, RID &triangle_buffer, RID &lights_buffer, RID &r_triangle_indices_buffer, RID &r_cluster_indices_buffer, RID &r_cluster_aabbs_buffer, RID &probe_positions_buffer, RID &grid_texture, RID &seams_buffer, BakeStepFunc p_step_function, void *p_bake_userdata) {
+void LightmapperRD::_create_acceleration_structures(RenderingDevice *rd, Size2i atlas_size, int atlas_slices, AABB &bounds, int grid_size, uint32_t p_cluster_size, Vector<Probe> &p_probe_positions, GenerateProbes p_generate_probes, Vector<int> &slice_triangle_count, Vector<int> &slice_seam_count, RID &vertex_buffer, RID &triangle_buffer, RID &lights_buffer, RID &r_triangle_indices_buffer, RID &r_cluster_indices_buffer, RID &r_cluster_aabbs_buffer, RID &probe_positions_buffer, RID &grid_texture, RID &seams_buffer, bool p_use_raytracing, RaytracingStructures &r_raytracing, BakeStepFunc p_step_function, void *p_bake_userdata) {
 	HashMap<Vertex, uint32_t, VertexHash> vertex_map;
 
 	//fill triangles array and vertex array
@@ -578,83 +640,88 @@ void LightmapperRD::_create_acceleration_structures(RenderingDevice *rd, Size2i 
 		p_step_function(0.4, RTR("Optimizing acceleration structure"), p_bake_userdata, true);
 	}
 
-	//fill list of triangles in grid
-	LocalVector<TriangleSort> triangle_sort;
-	for (uint32_t i = 0; i < triangles.size(); i++) {
-		const Triangle &t = triangles[i];
-		Vector3 face[3] = {
-			Vector3(vertex_array[t.indices[0]].position[0], vertex_array[t.indices[0]].position[1], vertex_array[t.indices[0]].position[2]),
-			Vector3(vertex_array[t.indices[1]].position[0], vertex_array[t.indices[1]].position[1], vertex_array[t.indices[1]].position[2]),
-			Vector3(vertex_array[t.indices[2]].position[0], vertex_array[t.indices[2]].position[1], vertex_array[t.indices[2]].position[2])
-		};
-		_plot_triangle_into_triangle_index_list(grid_size, Vector3i(), bounds, face, i, triangle_sort, grid_size);
-	}
-	//sort it
-	triangle_sort.sort();
-
 	LocalVector<uint32_t> cluster_indices;
 	LocalVector<ClusterAABB> cluster_aabbs;
 	Vector<uint32_t> triangle_indices;
-	triangle_indices.resize(triangle_sort.size());
 	Vector<uint32_t> grid_indices;
-	grid_indices.resize(grid_size * grid_size * grid_size * 2);
-	memset(grid_indices.ptrw(), 0, grid_indices.size() * sizeof(uint32_t));
 
-	{
-		// Fill grid with cell indices.
-		uint32_t last_cell = 0xFFFFFFFF;
-		uint32_t *giw = grid_indices.ptrw();
-		uint32_t cluster_count = 0;
-		uint32_t solid_cell_count = 0;
-		for (uint32_t i = 0; i < triangle_sort.size(); i++) {
-			uint32_t cell = triangle_sort[i].cell_index;
-			if (cell != last_cell) {
-				giw[cell * 2 + 1] = solid_cell_count;
-				solid_cell_count++;
-			}
-
-			if ((giw[cell * 2] % p_cluster_size) == 0) {
-				// Add an extra cluster every time the triangle counter reaches a multiple of the cluster size.
-				cluster_count++;
-			}
-
-			giw[cell * 2]++;
-			last_cell = cell;
+	// Hardware traversal replaces the uniform grid outright, so none of it is built in that case.
+	// This also skips the single threaded plotting pass, which dominates this step on heavy scenes.
+	if (!p_use_raytracing) {
+		//fill list of triangles in grid
+		LocalVector<TriangleSort> triangle_sort;
+		for (uint32_t i = 0; i < triangles.size(); i++) {
+			const Triangle &t = triangles[i];
+			Vector3 face[3] = {
+				Vector3(vertex_array[t.indices[0]].position[0], vertex_array[t.indices[0]].position[1], vertex_array[t.indices[0]].position[2]),
+				Vector3(vertex_array[t.indices[1]].position[0], vertex_array[t.indices[1]].position[1], vertex_array[t.indices[1]].position[2]),
+				Vector3(vertex_array[t.indices[2]].position[0], vertex_array[t.indices[2]].position[1], vertex_array[t.indices[2]].position[2])
+			};
+			_plot_triangle_into_triangle_index_list(grid_size, Vector3i(), bounds, face, i, triangle_sort, grid_size);
 		}
+		//sort it
+		triangle_sort.sort();
 
-		// Build fixed-size triangle clusters for all the cells to speed up the traversal. A cell can hold multiple clusters that each contain a fixed
-		// amount of triangles and an AABB. The tracer will check against the AABBs first to know whether it needs to visit the cell's triangles.
-		//
-		// The building algorithm will divide the triangles recursively contained inside each cell, sorting by the longest axis of the AABB on each step.
-		//
-		// - If the amount of triangles is less or equal to the cluster size, the AABB will be stored and the algorithm stops.
-		//
-		// - The division by two is increased to the next power of two of half the amount of triangles (with cluster size as the minimum value) to
-		//   ensure the first half always fills the cluster.
+		triangle_indices.resize(triangle_sort.size());
+		grid_indices.resize(grid_size * grid_size * grid_size * 2);
+		memset(grid_indices.ptrw(), 0, grid_indices.size() * sizeof(uint32_t));
 
-		cluster_indices.resize(solid_cell_count * 2);
-		cluster_aabbs.resize(cluster_count);
+		{
+			// Fill grid with cell indices.
+			uint32_t last_cell = 0xFFFFFFFF;
+			uint32_t *giw = grid_indices.ptrw();
+			uint32_t cluster_count = 0;
+			uint32_t solid_cell_count = 0;
+			for (uint32_t i = 0; i < triangle_sort.size(); i++) {
+				uint32_t cell = triangle_sort[i].cell_index;
+				if (cell != last_cell) {
+					giw[cell * 2 + 1] = solid_cell_count;
+					solid_cell_count++;
+				}
 
-		uint32_t i = 0;
-		uint32_t cluster_index = 0;
-		uint32_t solid_cell_index = 0;
-		uint32_t *tiw = triangle_indices.ptrw();
-		while (i < triangle_sort.size()) {
-			cluster_indices[solid_cell_index * 2] = cluster_index;
-			cluster_indices[solid_cell_index * 2 + 1] = i;
+				if ((giw[cell * 2] % p_cluster_size) == 0) {
+					// Add an extra cluster every time the triangle counter reaches a multiple of the cluster size.
+					cluster_count++;
+				}
 
-			uint32_t cell = triangle_sort[i].cell_index;
-			uint32_t triangle_count = giw[cell * 2];
-			uint32_t cell_cluster_count = (triangle_count + p_cluster_size - 1) / p_cluster_size;
-			_sort_triangle_clusters(p_cluster_size, cluster_index, i, triangle_count, triangle_sort, cluster_aabbs);
-
-			for (uint32_t j = 0; j < triangle_count; j++) {
-				tiw[i + j] = triangle_sort[i + j].triangle_index;
+				giw[cell * 2]++;
+				last_cell = cell;
 			}
 
-			i += triangle_count;
-			cluster_index += cell_cluster_count;
-			solid_cell_index++;
+			// Build fixed-size triangle clusters for all the cells to speed up the traversal. A cell can hold multiple clusters that each contain a fixed
+			// amount of triangles and an AABB. The tracer will check against the AABBs first to know whether it needs to visit the cell's triangles.
+			//
+			// The building algorithm will divide the triangles recursively contained inside each cell, sorting by the longest axis of the AABB on each step.
+			//
+			// - If the amount of triangles is less or equal to the cluster size, the AABB will be stored and the algorithm stops.
+			//
+			// - The division by two is increased to the next power of two of half the amount of triangles (with cluster size as the minimum value) to
+			//   ensure the first half always fills the cluster.
+
+			cluster_indices.resize(solid_cell_count * 2);
+			cluster_aabbs.resize(cluster_count);
+
+			uint32_t i = 0;
+			uint32_t cluster_index = 0;
+			uint32_t solid_cell_index = 0;
+			uint32_t *tiw = triangle_indices.ptrw();
+			while (i < triangle_sort.size()) {
+				cluster_indices[solid_cell_index * 2] = cluster_index;
+				cluster_indices[solid_cell_index * 2 + 1] = i;
+
+				uint32_t cell = triangle_sort[i].cell_index;
+				uint32_t triangle_count = giw[cell * 2];
+				uint32_t cell_cluster_count = (triangle_count + p_cluster_size - 1) / p_cluster_size;
+				_sort_triangle_clusters(p_cluster_size, cluster_index, i, triangle_count, triangle_sort, cluster_aabbs);
+
+				for (uint32_t j = 0; j < triangle_count; j++) {
+					tiw[i + j] = triangle_sort[i + j].triangle_index;
+				}
+
+				i += triangle_count;
+				cluster_index += cell_cluster_count;
+				solid_cell_index++;
+			}
 		}
 	}
 #if 0
@@ -703,11 +770,13 @@ void LightmapperRD::_create_acceleration_structures(RenderingDevice *rd, Size2i 
 
 		triangle_buffer = rd->storage_buffer_create(triangles.size() * sizeof(Triangle), triangles.span().reinterpret<uint8_t>());
 
-		r_triangle_indices_buffer = rd->storage_buffer_create(triangle_indices.size() * sizeof(uint32_t), triangle_indices.span().reinterpret<uint8_t>());
+		if (!p_use_raytracing) {
+			r_triangle_indices_buffer = rd->storage_buffer_create(triangle_indices.size() * sizeof(uint32_t), triangle_indices.span().reinterpret<uint8_t>());
 
-		r_cluster_indices_buffer = rd->storage_buffer_create(cluster_indices.size() * sizeof(uint32_t), cluster_indices.span().reinterpret<uint8_t>());
+			r_cluster_indices_buffer = rd->storage_buffer_create(cluster_indices.size() * sizeof(uint32_t), cluster_indices.span().reinterpret<uint8_t>());
 
-		r_cluster_aabbs_buffer = rd->storage_buffer_create(cluster_aabbs.size() * sizeof(ClusterAABB), cluster_aabbs.span().reinterpret<uint8_t>());
+			r_cluster_aabbs_buffer = rd->storage_buffer_create(cluster_aabbs.size() * sizeof(ClusterAABB), cluster_aabbs.span().reinterpret<uint8_t>());
+		}
 
 		// Even when there are no lights, the buffer must exist.
 		static const Light empty_lights[1];
@@ -725,7 +794,13 @@ void LightmapperRD::_create_acceleration_structures(RenderingDevice *rd, Size2i 
 		probe_positions_buffer = rd->storage_buffer_create(pb.size(), pb);
 	}
 
-	{ //grid
+	if (p_use_raytracing) {
+		// The tracer indexes the triangle buffer directly with the primitive index reported by the
+		// ray query, which is why the acceleration structure is built from the sorted triangle list.
+		if (!_build_raytracing_structures(rd, vertex_array, triangles, r_raytracing)) {
+			ERR_PRINT("Failed to build the raytracing acceleration structures for the lightmap bake.");
+		}
+	} else { //grid
 
 		RD::TextureFormat tf;
 		tf.width = grid_size;
@@ -1209,6 +1284,30 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 
 	ERR_FAIL_NULL_V(rd, BAKE_ERROR_LIGHTMAP_CANT_PRE_BAKE_MESHES);
 
+	// Ray queries let the tracer run against a hardware acceleration structure instead of walking
+	// the uniform grid. The grid path stays in place for devices without ray tracing support.
+	const bool raytracing_supported = rd->has_feature(RD::SUPPORTS_RAY_QUERY);
+	const bool raytracing_requested = GLOBAL_GET("rendering/lightmapping/bake_performance/use_hardware_raytracing");
+	const bool use_raytracing = raytracing_supported && raytracing_requested;
+	RaytracingStructures raytracing;
+
+	if (use_raytracing) {
+		print_line("Lightmap bake: tracing with hardware ray queries.");
+	} else if (!raytracing_supported) {
+		print_line("Lightmap bake: tracing with the voxel grid (this GPU does not support ray queries).");
+	} else {
+		print_line("Lightmap bake: tracing with the voxel grid (hardware ray tracing disabled in the project settings).");
+	}
+
+	// Every shader that includes lm_common_inc.glsl has to agree on the layout of set 0, so the
+	// define has to reach the raster and seam blending shaders as well, not just the tracer.
+	// These land where #VERSION_DEFINES sits, directly after #version, which is the only place an
+	// #extension directive is allowed to appear.
+	String common_defines;
+	if (use_raytracing) {
+		common_defines += "\n#extension GL_EXT_ray_query : enable\n#define USE_HW_RAYTRACING\n";
+	}
+
 	RID albedo_array_tex;
 	RID emission_array_tex;
 	RID normal_tex;
@@ -1356,20 +1455,39 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 
 	Vector<int> slice_seam_count;
 
+#define FREE_RID_IF_VALID(m_rid) \
+	if ((m_rid).is_valid()) { \
+		rd->free_rid(m_rid); \
+	}
+
 #define FREE_BUFFERS \
-	rd->free_rid(bake_parameters_buffer); \
+	FREE_RID_IF_VALID(bake_parameters_buffer) \
 	rd->free_rid(vertex_buffer); \
 	rd->free_rid(triangle_buffer); \
 	rd->free_rid(lights_buffer); \
-	rd->free_rid(triangle_indices_buffer); \
-	rd->free_rid(cluster_indices_buffer); \
-	rd->free_rid(cluster_aabbs_buffer); \
-	rd->free_rid(grid_texture); \
 	rd->free_rid(seams_buffer); \
-	rd->free_rid(probe_positions_buffer);
+	rd->free_rid(probe_positions_buffer); \
+	FREE_RID_IF_VALID(triangle_indices_buffer) \
+	FREE_RID_IF_VALID(cluster_indices_buffer) \
+	FREE_RID_IF_VALID(cluster_aabbs_buffer) \
+	FREE_RID_IF_VALID(grid_texture) \
+	FREE_RID_IF_VALID(raytracing.tlas) \
+	FREE_RID_IF_VALID(raytracing.blas) \
+	FREE_RID_IF_VALID(raytracing.index_buffer) \
+	FREE_RID_IF_VALID(raytracing.vertex_buffer)
 
 	const uint32_t cluster_size = 16;
-	_create_acceleration_structures(rd, atlas_size, atlas_slices, bounds, grid_size, cluster_size, probe_positions, p_generate_probes, slice_triangle_count, slice_seam_count, vertex_buffer, triangle_buffer, lights_buffer, triangle_indices_buffer, cluster_indices_buffer, cluster_aabbs_buffer, probe_positions_buffer, grid_texture, seams_buffer, p_step_function, p_bake_userdata);
+	_create_acceleration_structures(rd, atlas_size, atlas_slices, bounds, grid_size, cluster_size, probe_positions, p_generate_probes, slice_triangle_count, slice_seam_count, vertex_buffer, triangle_buffer, lights_buffer, triangle_indices_buffer, cluster_indices_buffer, cluster_aabbs_buffer, probe_positions_buffer, grid_texture, seams_buffer, use_raytracing, raytracing, p_step_function, p_bake_userdata);
+
+	if (use_raytracing && !raytracing.built) {
+		FREE_TEXTURES
+		FREE_BUFFERS
+		memdelete(rd);
+		if (rcd != nullptr) {
+			memdelete(rcd);
+		}
+		return BAKE_ERROR_LIGHTMAP_CANT_PRE_BAKE_MESHES;
+	}
 
 	// The index of the directional light used for shadowmasking.
 	int shadowmask_light_idx = -1;
@@ -1448,7 +1566,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	//shaders
 	Ref<RDShaderFile> raster_shader;
 	raster_shader.instantiate();
-	err = raster_shader->parse_versions_from_text(lm_raster_shader_glsl);
+	err = raster_shader->parse_versions_from_text(lm_raster_shader_glsl, common_defines);
 	if (err != OK) {
 		raster_shader->print_errors("raster_shader");
 
@@ -1511,7 +1629,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			u.append_id(triangle_buffer);
 			base_uniforms.push_back(u);
 		}
-		{
+		if (!use_raytracing) {
 			RD::Uniform u;
 			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
 			u.binding = 3;
@@ -1539,7 +1657,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			u.append_id(probe_positions_buffer);
 			base_uniforms.push_back(u);
 		}
-		{
+		if (!use_raytracing) {
 			RD::Uniform u;
 			u.uniform_type = RD::UNIFORM_TYPE_TEXTURE;
 			u.binding = 7;
@@ -1574,19 +1692,27 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 			u.append_id(area_light_atlas_sampler);
 			base_uniforms.push_back(u);
 		}
-		{
+		if (use_raytracing) {
 			RD::Uniform u;
-			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-			u.binding = 12;
-			u.append_id(cluster_indices_buffer);
+			u.uniform_type = RD::UNIFORM_TYPE_ACCELERATION_STRUCTURE;
+			u.binding = 14;
+			u.append_id(raytracing.tlas);
 			base_uniforms.push_back(u);
-		}
-		{
-			RD::Uniform u;
-			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
-			u.binding = 13;
-			u.append_id(cluster_aabbs_buffer);
-			base_uniforms.push_back(u);
+		} else {
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+				u.binding = 12;
+				u.append_id(cluster_indices_buffer);
+				base_uniforms.push_back(u);
+			}
+			{
+				RD::Uniform u;
+				u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
+				u.binding = 13;
+				u.append_id(cluster_aabbs_buffer);
+				base_uniforms.push_back(u);
+			}
 		}
 	}
 
@@ -1634,7 +1760,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	/* Plot direct light */
 
 	Ref<RDShaderFile> compute_shader;
-	String defines = "";
+	String defines = common_defines;
 	defines += "\n#define CLUSTER_SIZE " + uitos(cluster_size) + "\n";
 
 	if (p_bake_sh) {
@@ -2268,7 +2394,7 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	//shaders
 	Ref<RDShaderFile> blendseams_shader;
 	blendseams_shader.instantiate();
-	err = blendseams_shader->parse_versions_from_text(lm_blendseams_shader_glsl);
+	err = blendseams_shader->parse_versions_from_text(lm_blendseams_shader_glsl, common_defines);
 	if (err != OK) {
 		FREE_TEXTURES
 		FREE_BUFFERS
