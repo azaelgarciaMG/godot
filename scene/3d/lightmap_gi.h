@@ -62,6 +62,16 @@ private:
 	TypedArray<TextureLayered> storage_light_textures;
 	TypedArray<TextureLayered> storage_shadowmask_textures;
 
+	// Resource paths of the storage textures, kept so that streaming can drop the
+	// texture references (and their VRAM) and reload them later from disk.
+	PackedStringArray light_texture_paths;
+	PackedStringArray shadowmask_texture_paths;
+	bool textures_resident = true;
+
+	// When set, this resource is serialized with the atlas paths instead of the
+	// atlases themselves, so loading it does not pull them into video memory.
+	bool streaming = false;
+
 	bool uses_spherical_harmonics = false;
 	bool interior = false;
 
@@ -89,7 +99,13 @@ private:
 	void _reset_lightmap_textures();
 	void _reset_shadowmask_textures();
 
+	static PackedStringArray _collect_texture_paths(const TypedArray<TextureLayered> &p_textures);
+
+	void _set_light_texture_paths(const PackedStringArray &p_paths);
+	void _set_shadowmask_texture_paths(const PackedStringArray &p_paths);
+
 protected:
+	void _validate_property(PropertyInfo &p_property) const;
 	static void _bind_methods();
 
 public:
@@ -140,6 +156,25 @@ public:
 	void clear_shadowmask_textures();
 	bool has_shadowmask_textures();
 
+	// Merges a set of baked atlases into the single texture array the renderer
+	// samples, returning the atlas itself when there is only one. Reads every layer
+	// back from the GPU when there is more than one, so callers that care about
+	// frame time should run it off the main thread.
+	static Ref<TextureLayered> combine_textures(const TypedArray<TextureLayered> &p_textures);
+
+	// Streaming support. `release_textures()` drops the GPU textures while keeping
+	// everything the renderer needs to keep dynamic objects lit (probe capture data),
+	// and `restore_textures()` puts back textures reloaded from `get_*_texture_paths()`.
+	void set_streaming_enabled(bool p_enabled);
+	bool is_streaming_enabled() const;
+
+	bool are_textures_resident() const;
+	bool is_streamable() const;
+	PackedStringArray get_light_texture_paths() const;
+	PackedStringArray get_shadowmask_texture_paths() const;
+	void release_textures();
+	void restore_textures(const TypedArray<TextureLayered> &p_light_textures, const Ref<TextureLayered> &p_combined_light, const TypedArray<TextureLayered> &p_shadowmask_textures, const Ref<TextureLayered> &p_combined_shadowmask);
+
 	virtual RID get_rid() const override;
 	LightmapGIData();
 	~LightmapGIData();
@@ -184,6 +219,12 @@ public:
 		ENVIRONMENT_MODE_SCENE,
 		ENVIRONMENT_MODE_CUSTOM_SKY,
 		ENVIRONMENT_MODE_CUSTOM_COLOR,
+	};
+
+	enum StreamingMode {
+		STREAMING_MODE_DISABLED,
+		STREAMING_MODE_MANUAL,
+		STREAMING_MODE_CAMERA_DISTANCE,
 	};
 
 private:
@@ -235,6 +276,61 @@ private:
 
 	void _assign_lightmaps();
 	void _clear_lightmaps();
+
+	/* Streaming */
+
+	enum StreamingState {
+		STREAMING_STATE_RESIDENT,
+		STREAMING_STATE_RELEASED,
+		STREAMING_STATE_LOADING,
+	};
+
+	struct StreamingLoadRequest;
+
+	// Caps how many lightmaps may decompress and upload at the same time, so a
+	// player crossing several section borders at once can't saturate the pool.
+	static constexpr int STREAMING_MAX_CONCURRENT_LOADS = 2;
+	// Seconds to wait after a failed load before trying that lightmap again.
+	static constexpr double STREAMING_RETRY_COOLDOWN = 5.0;
+
+	static int streaming_active_loads;
+
+	// Configuration.
+	StreamingMode streaming_mode = STREAMING_MODE_DISABLED;
+	float streaming_load_distance = 40.0;
+	float streaming_unload_distance = 60.0;
+	AABB streaming_bounds; // Zero-sized means "derive from the baked meshes".
+
+	// Residency state.
+	StreamingState streaming_state = STREAMING_STATE_RESIDENT;
+	bool streaming_load_wanted = false;
+	double streaming_retry_cooldown = 0.0;
+
+	// In-flight load. Every path here has an outstanding ResourceLoader request and
+	// must be claimed with load_threaded_get(), which is what releases the loader's
+	// token; dropping one leaks a reference to the texture and its video memory.
+	PackedStringArray streaming_requested_light_paths;
+	PackedStringArray streaming_requested_shadowmask_paths;
+	StreamingLoadRequest *streaming_request = nullptr;
+
+	// Bounds derived from the bake, used when streaming_bounds is left unset.
+	mutable AABB streaming_derived_bounds;
+	mutable bool streaming_derived_bounds_dirty = true;
+
+	static void _streaming_combine_task(void *p_userdata);
+	static bool _streaming_load_sync(const PackedStringArray &p_paths, TypedArray<TextureLayered> &r_textures);
+
+	bool _streaming_is_active() const;
+	AABB _streaming_get_bounds() const;
+	void _streaming_process();
+	void _streaming_begin_load();
+	bool _streaming_poll_requests() const;
+	void _streaming_claim_requests(TypedArray<TextureLayered> &r_light, TypedArray<TextureLayered> &r_shadowmask);
+	void _streaming_complete_load();
+	void _streaming_abort_load();
+	void _streaming_release();
+	void _streaming_force_resident();
+	void _streaming_refresh();
 
 	struct BSPSimplex {
 		int vertices[4] = {};
@@ -351,6 +447,23 @@ public:
 	void set_camera_attributes(const Ref<CameraAttributes> &p_camera_attributes);
 	Ref<CameraAttributes> get_camera_attributes() const;
 
+	void set_streaming_mode(StreamingMode p_mode);
+	StreamingMode get_streaming_mode() const;
+
+	void set_streaming_load_distance(float p_distance);
+	float get_streaming_load_distance() const;
+
+	void set_streaming_unload_distance(float p_distance);
+	float get_streaming_unload_distance() const;
+
+	void set_streaming_bounds(const AABB &p_bounds);
+	AABB get_streaming_bounds() const;
+
+	void request_streaming_load();
+	void request_streaming_unload();
+	bool is_streaming_loaded() const;
+	bool is_streaming_load_pending() const;
+
 	AABB get_aabb() const override;
 
 	BakeError bake(Node *p_from_node, String p_image_data_path = "", Lightmapper::BakeStepFunc p_bake_step = nullptr, void *p_bake_userdata = nullptr);
@@ -358,6 +471,7 @@ public:
 	virtual PackedStringArray get_configuration_warnings() const override;
 
 	LightmapGI();
+	~LightmapGI();
 };
 
 VARIANT_ENUM_CAST(LightmapGIData::ShadowmaskMode);
@@ -365,3 +479,4 @@ VARIANT_ENUM_CAST(LightmapGI::BakeQuality);
 VARIANT_ENUM_CAST(LightmapGI::GenerateProbes);
 VARIANT_ENUM_CAST(LightmapGI::BakeError);
 VARIANT_ENUM_CAST(LightmapGI::EnvironmentMode);
+VARIANT_ENUM_CAST(LightmapGI::StreamingMode);

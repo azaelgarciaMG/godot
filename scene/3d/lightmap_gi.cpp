@@ -39,9 +39,13 @@
 #include "core/math/geometry_3d.h"
 #include "core/object/class_db.h"
 #include "core/object/object.h"
+#include "core/object/worker_thread_pool.h"
+#include "core/os/os.h"
+#include "scene/3d/camera_3d.h"
 #include "scene/3d/light_3d.h"
 #include "scene/3d/lightmap_probe.h"
 #include "scene/3d/mesh_instance_3d.h"
+#include "scene/main/viewport.h"
 #include "scene/resources/camera_attributes.h"
 #include "scene/resources/environment.h"
 #include "scene/resources/image_texture.h"
@@ -52,10 +56,6 @@
 
 #ifdef MODULE_LIGHTMAPPER_RD_ENABLED
 #include "servers/display/display_server.h"
-#endif
-
-#if defined(ANDROID_ENABLED) || defined(APPLE_EMBEDDED_ENABLED)
-#include "core/os/os.h"
 #endif
 
 void LightmapGIData::add_user(const NodePath &p_path, const Rect2 &p_uv_scale, int p_slice_index, int32_t p_sub_instance) {
@@ -114,32 +114,57 @@ Array LightmapGIData::_get_user_data() const {
 	return ret;
 }
 
+PackedStringArray LightmapGIData::_collect_texture_paths(const TypedArray<TextureLayered> &p_textures) {
+	PackedStringArray paths;
+	for (int i = 0; i < p_textures.size(); i++) {
+		Ref<TextureLayered> texture = p_textures[i];
+		if (texture.is_null()) {
+			return PackedStringArray();
+		}
+		const String path = texture->get_path();
+		// A texture that only lives in memory can't be reloaded later, and a texture
+		// built into another file (an "::" sub-resource) is kept alive by its owner,
+		// so releasing it would not return any video memory. A single such entry
+		// makes the whole set non-streamable.
+		if (path.is_empty() || path.contains("::")) {
+			return PackedStringArray();
+		}
+		paths.push_back(path);
+	}
+	return paths;
+}
+
+Ref<TextureLayered> LightmapGIData::combine_textures(const TypedArray<TextureLayered> &p_textures) {
+	if (p_textures.is_empty()) {
+		return Ref<TextureLayered>();
+	}
+
+	if (p_textures.size() == 1) {
+		return p_textures[0];
+	}
+
+	// A bake whose atlas exceeds Image::MAX_HEIGHT is stored as several textures and
+	// has to be merged into the one array the renderer samples.
+	Vector<Ref<Image>> images;
+	for (int i = 0; i < p_textures.size(); i++) {
+		Ref<TextureLayered> texture = p_textures[i];
+		ERR_FAIL_COND_V_MSG(texture.is_null(), Ref<TextureLayered>(), vformat("Invalid TextureLayered at index %d.", i));
+		for (int j = 0; j < texture->get_layers(); j++) {
+			images.push_back(texture->get_layer_data(j));
+		}
+	}
+
+	Ref<Texture2DArray> combined_texture;
+	combined_texture.instantiate();
+	combined_texture->create_from_images(images);
+	return combined_texture;
+}
+
 void LightmapGIData::set_lightmap_textures(const TypedArray<TextureLayered> &p_data) {
 	storage_light_textures = p_data;
-	if (p_data.is_empty()) {
-		combined_light_texture = Ref<TextureLayered>();
-		_reset_lightmap_textures();
-		return;
-	}
-
-	if (p_data.size() == 1) {
-		combined_light_texture = p_data[0];
-	} else {
-		Vector<Ref<Image>> images;
-		for (int i = 0; i < p_data.size(); i++) {
-			Ref<TextureLayered> texture = p_data[i];
-			ERR_FAIL_COND_MSG(texture.is_null(), vformat("Invalid TextureLayered at index %d.", i));
-			for (int j = 0; j < texture->get_layers(); j++) {
-				images.push_back(texture->get_layer_data(j));
-			}
-		}
-
-		Ref<Texture2DArray> combined_texture;
-		combined_texture.instantiate();
-
-		combined_texture->create_from_images(images);
-		combined_light_texture = combined_texture;
-	}
+	light_texture_paths = _collect_texture_paths(p_data);
+	textures_resident = true;
+	combined_light_texture = combine_textures(p_data);
 	_reset_lightmap_textures();
 }
 
@@ -149,33 +174,8 @@ TypedArray<TextureLayered> LightmapGIData::get_lightmap_textures() const {
 
 void LightmapGIData::set_shadowmask_textures(const TypedArray<TextureLayered> &p_data) {
 	storage_shadowmask_textures = p_data;
-
-	if (p_data.is_empty()) {
-		combined_shadowmask_texture = Ref<TextureLayered>();
-		_reset_shadowmask_textures();
-		return;
-	}
-
-	if (p_data.size() == 1) {
-		combined_shadowmask_texture = p_data[0];
-
-	} else {
-		Vector<Ref<Image>> images;
-		for (int i = 0; i < p_data.size(); i++) {
-			Ref<TextureLayered> texture = p_data[i];
-			ERR_FAIL_COND_MSG(texture.is_null(), vformat("Invalid TextureLayered at index %d.", i));
-			for (int j = 0; j < texture->get_layers(); j++) {
-				images.push_back(texture->get_layer_data(j));
-			}
-		}
-
-		Ref<Texture2DArray> combined_texture;
-		combined_texture.instantiate();
-
-		combined_texture->create_from_images(images);
-		combined_shadowmask_texture = combined_texture;
-	}
-
+	shadowmask_texture_paths = _collect_texture_paths(p_data);
+	combined_shadowmask_texture = combine_textures(p_data);
 	_reset_shadowmask_textures();
 }
 
@@ -186,11 +186,137 @@ TypedArray<TextureLayered> LightmapGIData::get_shadowmask_textures() const {
 void LightmapGIData::clear_shadowmask_textures() {
 	RS::get_singleton()->lightmap_set_shadowmask_textures(lightmap, RID());
 	storage_shadowmask_textures.clear();
+	shadowmask_texture_paths.clear();
 	combined_shadowmask_texture.unref();
 }
 
 bool LightmapGIData::has_shadowmask_textures() {
+	// The paths alone are enough to answer this while the atlases are released,
+	// which is the state a streaming lightmap spends most of its time in.
+	if (!shadowmask_texture_paths.is_empty()) {
+		return true;
+	}
 	return !storage_shadowmask_textures.is_empty() && combined_shadowmask_texture.is_valid();
+}
+
+void LightmapGIData::_set_light_texture_paths(const PackedStringArray &p_paths) {
+	light_texture_paths = p_paths;
+	// A resource saved for streaming carries paths but no atlases, so residency has
+	// to follow what is actually loaded rather than the default of "everything is".
+	textures_resident = !storage_light_textures.is_empty();
+}
+
+void LightmapGIData::_set_shadowmask_texture_paths(const PackedStringArray &p_paths) {
+	shadowmask_texture_paths = p_paths;
+}
+
+void LightmapGIData::_validate_property(PropertyInfo &p_property) const {
+	// Only honored when the paths can actually stand in for the atlases. Dropping
+	// the atlases without a usable path to reload them from would destroy the bake
+	// on the next save.
+	const bool store_paths_instead = streaming && !light_texture_paths.is_empty();
+
+	if (p_property.name == "lightmap_textures" || p_property.name == "shadowmask_textures") {
+		if (store_paths_instead) {
+			// Serializing the atlases here is what makes loading this resource pull
+			// them into video memory. The paths below stand in for them instead.
+			p_property.usage &= ~PROPERTY_USAGE_STORAGE;
+		}
+	} else if (p_property.name == "light_texture_paths" || p_property.name == "shadowmask_texture_paths") {
+		if (!store_paths_instead) {
+			// Without streaming the paths are recovered from the atlases themselves.
+			p_property.usage &= ~PROPERTY_USAGE_STORAGE;
+		}
+	}
+}
+
+void LightmapGIData::set_streaming_enabled(bool p_enabled) {
+	if (streaming == p_enabled) {
+		return;
+	}
+	streaming = p_enabled;
+	notify_property_list_changed();
+}
+
+bool LightmapGIData::is_streaming_enabled() const {
+	return streaming;
+}
+
+bool LightmapGIData::are_textures_resident() const {
+	return textures_resident;
+}
+
+bool LightmapGIData::is_streamable() const {
+	return !light_texture_paths.is_empty();
+}
+
+PackedStringArray LightmapGIData::get_light_texture_paths() const {
+	return light_texture_paths;
+}
+
+PackedStringArray LightmapGIData::get_shadowmask_texture_paths() const {
+	return shadowmask_texture_paths;
+}
+
+void LightmapGIData::release_textures() {
+	if (!textures_resident) {
+		return;
+	}
+	ERR_FAIL_COND_MSG(light_texture_paths.is_empty(), "Cannot release the textures of a LightmapGIData whose textures have no resource path, they could not be reloaded afterwards.");
+
+	// A texture that outlives its release keeps its video memory, which silently
+	// defeats streaming, so under --verbose the object identities are kept and
+	// checked once the references are gone.
+	const bool verbose = OS::get_singleton()->is_stdout_verbose();
+	LocalVector<ObjectID> watched_ids;
+	if (verbose) {
+		for (int i = 0; i < storage_light_textures.size(); i++) {
+			Ref<TextureLayered> texture = storage_light_textures[i];
+			if (texture.is_valid()) {
+				watched_ids.push_back(texture->get_instance_id());
+			}
+		}
+	}
+
+	// Order matters. The renderer keeps the light texture RID in a global slot array
+	// (LightStorage::lightmap_textures) and nothing notifies it when a texture is
+	// freed, so the slot has to be released before the last reference dies.
+	RS::get_singleton()->lightmap_set_textures(lightmap, RID(), uses_spherical_harmonics);
+	RS::get_singleton()->lightmap_set_shadowmask_textures(lightmap, RID());
+
+	combined_light_texture.unref();
+	combined_shadowmask_texture.unref();
+	// Detached rather than cleared in place: an Array shares its storage with
+	// whoever passed it in, so clearing would empty their copy as well.
+	storage_light_textures = TypedArray<TextureLayered>();
+	storage_shadowmask_textures = TypedArray<TextureLayered>();
+
+	textures_resident = false;
+
+	// Checked by object identity rather than through ResourceCache, which does not
+	// track every way a texture can be loaded.
+	for (const ObjectID &id : watched_ids) {
+		const Resource *survivor = Object::cast_to<Resource>(ObjectDB::get_instance(id));
+		if (survivor != nullptr) {
+			WARN_PRINT(vformat("Lightmap texture \"%s\" outlived its release and is still held by %d other reference(s). Its video memory will not be freed.",
+					survivor->get_path(), survivor->get_reference_count()));
+		}
+	}
+}
+
+void LightmapGIData::restore_textures(const TypedArray<TextureLayered> &p_light_textures, const Ref<TextureLayered> &p_combined_light, const TypedArray<TextureLayered> &p_shadowmask_textures, const Ref<TextureLayered> &p_combined_shadowmask) {
+	ERR_FAIL_COND(p_combined_light.is_null());
+
+	storage_light_textures = p_light_textures;
+	combined_light_texture = p_combined_light;
+	storage_shadowmask_textures = p_shadowmask_textures;
+	combined_shadowmask_texture = p_combined_shadowmask;
+	textures_resident = true;
+
+	// The paths are deliberately left untouched: they still describe this data and
+	// are what a later release/restore cycle reloads from.
+	_reset_lightmap_textures();
+	_reset_shadowmask_textures();
 }
 
 RID LightmapGIData::get_rid() const {
@@ -348,6 +474,17 @@ void LightmapGIData::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_shadowmask_textures", "shadowmask_textures"), &LightmapGIData::set_shadowmask_textures);
 	ClassDB::bind_method(D_METHOD("get_shadowmask_textures"), &LightmapGIData::get_shadowmask_textures);
 
+	ClassDB::bind_method(D_METHOD("set_streaming_enabled", "enabled"), &LightmapGIData::set_streaming_enabled);
+	ClassDB::bind_method(D_METHOD("is_streaming_enabled"), &LightmapGIData::is_streaming_enabled);
+
+	ClassDB::bind_method(D_METHOD("are_textures_resident"), &LightmapGIData::are_textures_resident);
+	ClassDB::bind_method(D_METHOD("is_streamable"), &LightmapGIData::is_streamable);
+	ClassDB::bind_method(D_METHOD("get_light_texture_paths"), &LightmapGIData::get_light_texture_paths);
+	ClassDB::bind_method(D_METHOD("get_shadowmask_texture_paths"), &LightmapGIData::get_shadowmask_texture_paths);
+
+	ClassDB::bind_method(D_METHOD("_set_light_texture_paths", "paths"), &LightmapGIData::_set_light_texture_paths);
+	ClassDB::bind_method(D_METHOD("_set_shadowmask_texture_paths", "paths"), &LightmapGIData::_set_shadowmask_texture_paths);
+
 	ClassDB::bind_method(D_METHOD("set_uses_spherical_harmonics", "uses_spherical_harmonics"), &LightmapGIData::set_uses_spherical_harmonics);
 	ClassDB::bind_method(D_METHOD("is_using_spherical_harmonics"), &LightmapGIData::is_using_spherical_harmonics);
 
@@ -364,6 +501,9 @@ void LightmapGIData::_bind_methods() {
 
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "lightmap_textures", PROPERTY_HINT_ARRAY_TYPE, "TextureLayered", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_READ_ONLY), "set_lightmap_textures", "get_lightmap_textures");
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "shadowmask_textures", PROPERTY_HINT_ARRAY_TYPE, "TextureLayered", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_READ_ONLY), "set_shadowmask_textures", "get_shadowmask_textures");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "streaming"), "set_streaming_enabled", "is_streaming_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "light_texture_paths", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "_set_light_texture_paths", "get_light_texture_paths");
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "shadowmask_texture_paths", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "_set_shadowmask_texture_paths", "get_shadowmask_texture_paths");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "uses_spherical_harmonics", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "set_uses_spherical_harmonics", "is_using_spherical_harmonics");
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "user_data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "_set_user_data", "_get_user_data");
 	ADD_PROPERTY(PropertyInfo(Variant::DICTIONARY, "probe_data", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR | PROPERTY_USAGE_INTERNAL), "_set_probe_data", "_get_probe_data");
@@ -1687,6 +1827,10 @@ LightmapGI::BakeError LightmapGI::bake(Node *p_from_node, String p_image_data_pa
 		gi_data->set_capture_data(bounds, interior, Vector<Vector3>(probe_points), Vector<Color>(probe_sh), gi_data->get_capture_tetrahedra(), gi_data->get_capture_bsp_tree(), exposure_normalization, bake_probe_hash);
 	}
 
+	// Saved by path rather than by reference when this lightmap streams, so that
+	// loading a scene does not bring every section's atlas into video memory.
+	gi_data->set_streaming_enabled(streaming_mode != STREAMING_MODE_DISABLED);
+
 	gi_data->set_path(p_image_data_path, true);
 	Error err = ResourceSaver::save(gi_data);
 
@@ -1714,12 +1858,51 @@ void LightmapGI::_notification(int p_what) {
 					light_data->clear_users();
 				}
 
-				_assign_lightmaps();
+				if (_streaming_is_active()) {
+					streaming_derived_bounds_dirty = true;
+					set_process_internal(true);
+
+					// A resource saved for streaming arrives with no atlases at all,
+					// while one saved normally arrives with them already in video
+					// memory. Start from whichever is actually the case.
+					streaming_state = light_data->are_textures_resident() ? STREAMING_STATE_RESIDENT : STREAMING_STATE_RELEASED;
+
+					if (streaming_state == STREAMING_STATE_RESIDENT) {
+						if (streaming_load_wanted) {
+							// Already paid for by the scene load and wanted anyway.
+							_assign_lightmaps();
+						} else {
+							_streaming_release();
+						}
+					}
+					// When released, _streaming_process() acquires the atlases on the
+					// first frame if the streaming policy asks for them.
+				} else if (light_data->are_textures_resident()) {
+					_assign_lightmaps();
+				} else {
+					// A resource saved for streaming carries paths instead of atlases,
+					// so it has to be materialized first. It binds the meshes itself,
+					// and deliberately leaves them unbound if the load fails: binding
+					// to a released lightmap samples the default white array and would
+					// render the whole section blown out.
+					_streaming_force_resident();
+				}
+			}
+		} break;
+
+		case NOTIFICATION_INTERNAL_PROCESS: {
+			// A load already in flight is collected even if streaming just went
+			// inactive, otherwise its budget slot and its loader tokens, which hold
+			// references to the atlases, would never be released.
+			if (_streaming_is_active() || streaming_state == STREAMING_STATE_LOADING) {
+				_streaming_process();
 			}
 		} break;
 
 		case NOTIFICATION_EXIT_TREE: {
 			last_owner = get_owner();
+
+			_streaming_abort_load();
 
 			if (light_data.is_valid()) {
 				_clear_lightmaps();
@@ -1785,23 +1968,506 @@ void LightmapGI::_clear_lightmaps() {
 	}
 }
 
+/* Streaming */
+
+int LightmapGI::streaming_active_loads = 0;
+
+// Merges already-loaded atlases off the main thread. Deliberately does no resource
+// loading of its own: ResourceLoader::load() called from a pool task takes the
+// LOAD_THREAD_SPAWN_SINGLE path, whose token this code cannot pair with a get(),
+// which leaks a reference to the texture and pins its video memory forever.
+struct LightmapGI::StreamingLoadRequest {
+	// Inputs, written before the task is queued.
+	TypedArray<TextureLayered> light_textures;
+	TypedArray<TextureLayered> shadowmask_textures;
+
+	// Outputs, only read after the pool reports the task as completed.
+	Ref<TextureLayered> combined_light;
+	Ref<TextureLayered> combined_shadowmask;
+
+	SafeFlag cancelled;
+	WorkerThreadPool::TaskID task_id = WorkerThreadPool::INVALID_TASK_ID;
+};
+
+static real_t _lightmap_aabb_distance_to(const AABB &p_aabb, const Vector3 &p_point) {
+	const Vector3 end = p_aabb.position + p_aabb.size;
+	Vector3 delta;
+	for (int i = 0; i < 3; i++) {
+		delta[i] = MAX((real_t)0.0, MAX(p_aabb.position[i] - p_point[i], p_point[i] - end[i]));
+	}
+	return delta.length();
+}
+
+bool LightmapGI::_streaming_load_sync(const PackedStringArray &p_paths, TypedArray<TextureLayered> &r_textures) {
+	// Main-thread only. ResourceLoader::load() takes LOAD_THREAD_FROM_CURRENT here
+	// and manages its own token; from a WorkerThreadPool task it would instead take
+	// LOAD_THREAD_SPAWN_SINGLE and leave a token this code cannot claim, leaking a
+	// reference to the texture. Threaded loads go through the request/get pair.
+	for (const String &path : p_paths) {
+		Ref<TextureLayered> texture = ResourceLoader::load(path, "TextureLayered");
+		if (texture.is_null()) {
+			ERR_PRINT(vformat("Failed to load lightmap texture \"%s\".", path));
+			r_textures.clear();
+			return false;
+		}
+		r_textures.push_back(texture);
+	}
+	return true;
+}
+
+void LightmapGI::_streaming_combine_task(void *p_userdata) {
+	StreamingLoadRequest *request = static_cast<StreamingLoadRequest *>(p_userdata);
+
+	// Checked between stages: a cancelled request that the pool never got to start
+	// would otherwise run the full decompress on whoever waits for it.
+	if (request->cancelled.is_set()) {
+		return;
+	}
+	request->combined_light = LightmapGIData::combine_textures(request->light_textures);
+
+	if (request->shadowmask_textures.is_empty() || request->cancelled.is_set()) {
+		return;
+	}
+	request->combined_shadowmask = LightmapGIData::combine_textures(request->shadowmask_textures);
+}
+
+bool LightmapGI::_streaming_is_active() const {
+	return streaming_mode != STREAMING_MODE_DISABLED &&
+			!Engine::get_singleton()->is_editor_hint() &&
+			light_data.is_valid() &&
+			light_data->is_streamable();
+}
+
+AABB LightmapGI::_streaming_get_bounds() const {
+	if (streaming_bounds.has_volume()) {
+		return streaming_bounds;
+	}
+	if (!streaming_derived_bounds_dirty) {
+		return streaming_derived_bounds;
+	}
+	ERR_FAIL_COND_V(light_data.is_null(), AABB());
+
+	AABB bounds;
+	bool bounds_found = false;
+
+	const AABB capture_bounds = light_data->get_capture_bounds();
+	if (capture_bounds.has_volume()) {
+		bounds = capture_bounds;
+		bounds_found = true;
+	} else if (is_inside_tree()) {
+		// Bakes made without light probes carry no capture bounds, so fall back to
+		// the combined extents of the meshes this lightmap actually lights.
+		const Transform3D to_local = get_global_transform().affine_inverse();
+		for (int i = 0; i < light_data->get_user_count(); i++) {
+			VisualInstance3D *vi = Object::cast_to<VisualInstance3D>(get_node_or_null(light_data->get_user_path(i)));
+			if (!vi) {
+				continue;
+			}
+			const AABB user_bounds = (to_local * vi->get_global_transform()).xform(vi->get_aabb());
+			if (bounds_found) {
+				bounds.merge_with(user_bounds);
+			} else {
+				bounds = user_bounds;
+				bounds_found = true;
+			}
+		}
+	}
+
+	// Cached unconditionally, including when nothing could be derived. Retrying
+	// would mean resolving every user node again on every single frame, and the
+	// inputs only change on events that invalidate this explicitly.
+	streaming_derived_bounds = bounds;
+	streaming_derived_bounds_dirty = false;
+
+	if (!bounds_found) {
+		WARN_PRINT(vformat("%s cannot derive streaming bounds: the bake produced no light probes and none of its baked meshes could be resolved. Distance will be measured from the node's origin; set streaming_bounds explicitly to fix this.", get_name()));
+	}
+	return streaming_derived_bounds;
+}
+
+void LightmapGI::_streaming_process() {
+	if (streaming_retry_cooldown > 0.0) {
+		streaming_retry_cooldown = MAX(0.0, streaming_retry_cooldown - get_process_delta_time());
+	}
+
+	// Collect a finished load first so that a decision taken below acts on the
+	// state this lightmap is actually in.
+	if (streaming_state == STREAMING_STATE_LOADING) {
+		if (streaming_request == nullptr) {
+			// Still waiting on ResourceLoader.
+			if (_streaming_poll_requests()) {
+				_streaming_complete_load();
+			}
+		} else if (WorkerThreadPool::get_singleton()->is_task_completed(streaming_request->task_id)) {
+			// The multi-atlas merge finished.
+			_streaming_complete_load();
+		}
+	}
+
+	// Everything below decides what residency *should* be, which only makes sense
+	// while this lightmap is still streaming. Collecting the load above does not.
+	if (!_streaming_is_active()) {
+		return;
+	}
+
+	if (streaming_mode == STREAMING_MODE_CAMERA_DISTANCE) {
+		const Camera3D *camera = get_viewport() ? get_viewport()->get_camera_3d() : nullptr;
+		if (camera) {
+			const AABB bounds = get_global_transform().xform(_streaming_get_bounds());
+			const real_t distance = _lightmap_aabb_distance_to(bounds, camera->get_global_transform().origin);
+			if (distance <= streaming_load_distance) {
+				streaming_load_wanted = true;
+			} else if (distance > streaming_unload_distance) {
+				streaming_load_wanted = false;
+			}
+			// Between the two distances the previous decision stands. That gap is what
+			// keeps a camera loitering on a section border from thrashing VRAM.
+		}
+	}
+
+	if (streaming_load_wanted) {
+		if (streaming_state == STREAMING_STATE_RELEASED) {
+			_streaming_begin_load();
+		}
+	} else if (streaming_state != STREAMING_STATE_RELEASED) {
+		_streaming_release();
+	}
+}
+
+void LightmapGI::_streaming_begin_load() {
+	ERR_FAIL_COND(streaming_request != nullptr);
+	ERR_FAIL_COND(light_data.is_null());
+
+	if (streaming_active_loads >= STREAMING_MAX_CONCURRENT_LOADS || streaming_retry_cooldown > 0.0) {
+		return; // Over budget or backing off after a failure, retried later.
+	}
+
+	const PackedStringArray light_paths = light_data->get_light_texture_paths();
+	// Without atlases to request there is nothing to wait for, and entering the
+	// loading state would just fail and back off on the next frame.
+	ERR_FAIL_COND(light_paths.is_empty());
+
+	streaming_requested_light_paths = light_paths;
+	streaming_requested_shadowmask_paths = light_data->get_shadowmask_texture_paths();
+
+	// Iterated through const references so that reading them does not detach these
+	// arrays from the copy-on-write storage they share with the resource.
+	const PackedStringArray &shadowmask_paths = streaming_requested_shadowmask_paths;
+	for (const String &path : light_paths) {
+		ResourceLoader::load_threaded_request(path, "TextureLayered");
+	}
+	for (const String &path : shadowmask_paths) {
+		ResourceLoader::load_threaded_request(path, "TextureLayered");
+	}
+
+	streaming_state = STREAMING_STATE_LOADING;
+	streaming_active_loads++;
+}
+
+bool LightmapGI::_streaming_poll_requests() const {
+	// True once every request has settled, whether loaded or failed. Both outcomes
+	// still have to be claimed, so the caller must always follow up with
+	// _streaming_claim_requests().
+	for (const String &path : streaming_requested_light_paths) {
+		if (ResourceLoader::load_threaded_get_status(path) == ResourceLoader::THREAD_LOAD_IN_PROGRESS) {
+			return false;
+		}
+	}
+	for (const String &path : streaming_requested_shadowmask_paths) {
+		if (ResourceLoader::load_threaded_get_status(path) == ResourceLoader::THREAD_LOAD_IN_PROGRESS) {
+			return false;
+		}
+	}
+	return true;
+}
+
+void LightmapGI::_streaming_claim_requests(TypedArray<TextureLayered> &r_light, TypedArray<TextureLayered> &r_shadowmask) {
+	// Every requested path is claimed, including on failure and cancellation. This
+	// is what releases the loader's user token; skipping one keeps the token, and
+	// with it a reference to the texture, alive for the rest of the session.
+	// Iterated through const references to avoid detaching the copy-on-write
+	// storage these arrays share with the resource.
+	const PackedStringArray &light_paths = streaming_requested_light_paths;
+	const PackedStringArray &shadowmask_paths = streaming_requested_shadowmask_paths;
+
+	bool light_failed = false;
+	for (const String &path : light_paths) {
+		Ref<TextureLayered> texture = ResourceLoader::load_threaded_get(path);
+		if (texture.is_null()) {
+			ERR_PRINT(vformat("Failed to stream in lightmap texture \"%s\".", path));
+			// Keep claiming the rest before giving up, so no token is left behind.
+			light_failed = true;
+			continue;
+		}
+		r_light.push_back(texture);
+	}
+	if (light_failed) {
+		// A partial atlas set would be worse than none: slice indices would no
+		// longer line up with what the meshes were baked against.
+		r_light.clear();
+	}
+	for (const String &path : shadowmask_paths) {
+		Ref<TextureLayered> texture = ResourceLoader::load_threaded_get(path);
+		if (texture.is_valid()) {
+			r_shadowmask.push_back(texture);
+		}
+	}
+
+	streaming_requested_light_paths = PackedStringArray();
+	streaming_requested_shadowmask_paths = PackedStringArray();
+}
+
+void LightmapGI::_streaming_complete_load() {
+	TypedArray<TextureLayered> light_textures;
+	TypedArray<TextureLayered> shadowmask_textures;
+	Ref<TextureLayered> combined_light;
+	Ref<TextureLayered> combined_shadowmask;
+
+	if (streaming_request == nullptr) {
+		// Resource phase just finished. Claim everything that was requested.
+		_streaming_claim_requests(light_textures, shadowmask_textures);
+
+		if (light_textures.size() > 1) {
+			// Several atlases have to be merged, and merging reads every layer back
+			// from the GPU. Hand that to a worker and pick it up on a later frame.
+			StreamingLoadRequest *request = memnew(StreamingLoadRequest);
+			request->light_textures = light_textures;
+			request->shadowmask_textures = shadowmask_textures;
+			request->task_id = WorkerThreadPool::get_singleton()->add_native_task(&LightmapGI::_streaming_combine_task, request, false, vformat("LightmapGI atlas merge (%s)", get_name()));
+			streaming_request = request;
+			return; // Still loading; collected on a later frame.
+		}
+
+		combined_light = LightmapGIData::combine_textures(light_textures);
+		combined_shadowmask = LightmapGIData::combine_textures(shadowmask_textures);
+	} else {
+		StreamingLoadRequest *request = streaming_request;
+		streaming_request = nullptr;
+
+		// Required even for an already finished task: this is what releases it.
+		WorkerThreadPool::get_singleton()->wait_for_task_completion(request->task_id);
+
+		light_textures = request->light_textures;
+		shadowmask_textures = request->shadowmask_textures;
+		combined_light = request->combined_light;
+		combined_shadowmask = request->combined_shadowmask;
+		memdelete(request);
+	}
+
+	streaming_active_loads--;
+
+	if (light_data.is_valid() && combined_light.is_valid()) {
+		light_data->restore_textures(light_textures, combined_light, shadowmask_textures, combined_shadowmask);
+		streaming_state = STREAMING_STATE_RESIDENT;
+		if (is_inside_tree()) {
+			_assign_lightmaps();
+		}
+		emit_signal(SNAME("streaming_loaded"));
+		streaming_retry_cooldown = 0.0;
+	} else {
+		// Errors were already reported while claiming. Back off before trying again:
+		// this lightmap is still wanted, so without a cooldown the next frame would
+		// start another load, and a persistent failure becomes a load storm.
+		streaming_state = STREAMING_STATE_RELEASED;
+		streaming_retry_cooldown = STREAMING_RETRY_COOLDOWN;
+	}
+}
+
+void LightmapGI::_streaming_abort_load() {
+	if (streaming_state != STREAMING_STATE_LOADING) {
+		return;
+	}
+
+	if (streaming_request != nullptr) {
+		StreamingLoadRequest *request = streaming_request;
+		streaming_request = nullptr;
+
+		request->cancelled.set();
+		WorkerThreadPool::get_singleton()->wait_for_task_completion(request->task_id);
+		memdelete(request);
+	} else {
+		// Outstanding ResourceLoader requests still have to be claimed even though
+		// the result is thrown away, otherwise their tokens, and the textures they
+		// reference, stay alive for the rest of the session.
+		TypedArray<TextureLayered> discarded_light;
+		TypedArray<TextureLayered> discarded_shadowmask;
+		_streaming_claim_requests(discarded_light, discarded_shadowmask);
+	}
+
+	streaming_active_loads--;
+	streaming_state = STREAMING_STATE_RELEASED;
+}
+
+void LightmapGI::_streaming_release() {
+	_streaming_abort_load();
+
+	if (light_data.is_null() || !light_data->are_textures_resident()) {
+		streaming_state = STREAMING_STATE_RELEASED;
+		return;
+	}
+
+	// Unbind the meshes before the textures go away. A vacated renderer slot is
+	// refilled with an all-white default array, so any geometry still pointing at
+	// this lightmap would render blown out for as long as it stayed bound.
+	if (is_inside_tree()) {
+		_clear_lightmaps();
+	}
+	light_data->release_textures();
+
+	if (light_data->are_textures_resident()) {
+		// release_textures() refused and reported why. Rebind, and do not claim a
+		// release that did not happen: reporting freed memory that is still held
+		// makes the leak look like a measurement problem instead of a real one.
+		if (is_inside_tree()) {
+			_assign_lightmaps();
+		}
+		return;
+	}
+
+	streaming_state = STREAMING_STATE_RELEASED;
+	emit_signal(SNAME("streaming_unloaded"));
+}
+
+void LightmapGI::_streaming_force_resident() {
+	_streaming_abort_load();
+
+	if (light_data.is_valid() && !light_data->are_textures_resident()) {
+		// Only reachable by explicitly opting out of streaming, so blocking here is
+		// acceptable in exchange for the textures being back before this returns.
+		TypedArray<TextureLayered> light_textures;
+		TypedArray<TextureLayered> shadowmask_textures;
+
+		if (_streaming_load_sync(light_data->get_light_texture_paths(), light_textures)) {
+			_streaming_load_sync(light_data->get_shadowmask_texture_paths(), shadowmask_textures);
+
+			Ref<TextureLayered> combined_light = LightmapGIData::combine_textures(light_textures);
+			if (combined_light.is_valid()) {
+				light_data->restore_textures(light_textures, combined_light, shadowmask_textures, LightmapGIData::combine_textures(shadowmask_textures));
+				if (is_inside_tree()) {
+					_assign_lightmaps();
+				}
+			}
+		}
+	}
+
+	// A failed load leaves the textures released, and the state has to say so.
+	streaming_state = (light_data.is_null() || light_data->are_textures_resident())
+			? STREAMING_STATE_RESIDENT
+			: STREAMING_STATE_RELEASED;
+}
+
+void LightmapGI::_streaming_refresh() {
+	if (!is_inside_tree()) {
+		return;
+	}
+
+	if (_streaming_is_active()) {
+		streaming_derived_bounds_dirty = true;
+		set_process_internal(true);
+		if (streaming_state == STREAMING_STATE_RESIDENT && !streaming_load_wanted) {
+			// Scene loading already paid for these textures; drop them and let the
+			// streaming policy decide when they are worth paying for again.
+			_streaming_release();
+		}
+	} else {
+		set_process_internal(false);
+		_streaming_force_resident();
+	}
+}
+
+void LightmapGI::set_streaming_mode(StreamingMode p_mode) {
+	ERR_FAIL_INDEX(p_mode, STREAMING_MODE_CAMERA_DISTANCE + 1);
+	if (streaming_mode == p_mode) {
+		return;
+	}
+	streaming_mode = p_mode;
+	streaming_load_wanted = false;
+	_streaming_refresh();
+	notify_property_list_changed();
+}
+
+LightmapGI::StreamingMode LightmapGI::get_streaming_mode() const {
+	return streaming_mode;
+}
+
+void LightmapGI::set_streaming_load_distance(float p_distance) {
+	streaming_load_distance = MAX(0.0f, p_distance);
+	streaming_unload_distance = MAX(streaming_unload_distance, streaming_load_distance);
+}
+
+float LightmapGI::get_streaming_load_distance() const {
+	return streaming_load_distance;
+}
+
+void LightmapGI::set_streaming_unload_distance(float p_distance) {
+	// Must stay at or above the load distance, otherwise the hysteresis band
+	// inverts and the lightmap oscillates every frame.
+	streaming_unload_distance = MAX(p_distance, streaming_load_distance);
+}
+
+float LightmapGI::get_streaming_unload_distance() const {
+	return streaming_unload_distance;
+}
+
+void LightmapGI::set_streaming_bounds(const AABB &p_bounds) {
+	streaming_bounds = p_bounds;
+	streaming_derived_bounds_dirty = true;
+	update_gizmos();
+}
+
+AABB LightmapGI::get_streaming_bounds() const {
+	return streaming_bounds;
+}
+
+void LightmapGI::request_streaming_load() {
+	// In STREAMING_MODE_CAMERA_DISTANCE this only holds until the next distance
+	// evaluation, which stays authoritative for that mode.
+	streaming_load_wanted = true;
+	if (_streaming_is_active() && streaming_state == STREAMING_STATE_RELEASED) {
+		_streaming_begin_load();
+	}
+}
+
+void LightmapGI::request_streaming_unload() {
+	streaming_load_wanted = false;
+	if (_streaming_is_active() && streaming_state != STREAMING_STATE_RELEASED) {
+		_streaming_release();
+	}
+}
+
+bool LightmapGI::is_streaming_loaded() const {
+	return streaming_state == STREAMING_STATE_RESIDENT;
+}
+
+bool LightmapGI::is_streaming_load_pending() const {
+	return streaming_state == STREAMING_STATE_LOADING;
+}
+
 void LightmapGI::set_light_data(const Ref<LightmapGIData> &p_data) {
 	if (light_data.is_valid()) {
+		_streaming_abort_load();
 		if (is_inside_tree()) {
 			_clear_lightmaps();
 		}
 		set_base(RID());
 	}
 	light_data = p_data;
+	// Data saved for streaming arrives with its atlases released.
+	streaming_state = (light_data.is_null() || light_data->are_textures_resident())
+			? STREAMING_STATE_RESIDENT
+			: STREAMING_STATE_RELEASED;
+	streaming_load_wanted = false;
+	streaming_derived_bounds_dirty = true;
 
 	if (light_data.is_valid()) {
 		set_base(light_data->get_rid());
-		if (is_inside_tree()) {
+		if (is_inside_tree() && !_streaming_is_active()) {
 			_assign_lightmaps();
 		}
 		light_data->update_shadowmask_mode(shadowmask_mode);
 	}
 
+	_streaming_refresh();
 	update_gizmos();
 }
 
@@ -2001,6 +2667,10 @@ Ref<CameraAttributes> LightmapGI::get_camera_attributes() const {
 PackedStringArray LightmapGI::get_configuration_warnings() const {
 	PackedStringArray warnings = VisualInstance3D::get_configuration_warnings();
 
+	if (streaming_mode != STREAMING_MODE_DISABLED && light_data.is_valid() && !light_data->is_streamable()) {
+		warnings.push_back(RTR("Streaming is enabled, but the lightmap textures are not saved as separate files and could not be reloaded after being released. Streaming will be ignored for this lightmap."));
+	}
+
 #ifdef MODULE_LIGHTMAPPER_RD_ENABLED
 	if (!DisplayServer::get_singleton()->can_create_rendering_device()) {
 		warnings.push_back(vformat(RTR("Lightmaps can only be baked from a GPU that supports the RenderingDevice backends.\nYour GPU (%s) does not support RenderingDevice, as it does not support Vulkan, Direct3D 12, or Metal.\nLightmap baking will not be available on this device, although rendering existing baked lightmaps will work."), RenderingServer::get_singleton()->get_video_adapter_name()));
@@ -2026,6 +2696,14 @@ void LightmapGI::_validate_property(PropertyInfo &p_property) const {
 	}
 	if (p_property.name == "supersampling_factor") {
 		if (!supersampling_enabled) {
+			p_property.usage = PROPERTY_USAGE_NO_EDITOR;
+		}
+	} else if (p_property.name == "streaming_load_distance" || p_property.name == "streaming_unload_distance") {
+		if (streaming_mode != STREAMING_MODE_CAMERA_DISTANCE) {
+			p_property.usage = PROPERTY_USAGE_NO_EDITOR;
+		}
+	} else if (p_property.name == "streaming_bounds") {
+		if (streaming_mode != STREAMING_MODE_CAMERA_DISTANCE) {
 			p_property.usage = PROPERTY_USAGE_NO_EDITOR;
 		}
 	} else if (p_property.name == "environment_custom_sky") {
@@ -2054,6 +2732,23 @@ void LightmapGI::_validate_property(PropertyInfo &p_property) const {
 void LightmapGI::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_light_data", "data"), &LightmapGI::set_light_data);
 	ClassDB::bind_method(D_METHOD("get_light_data"), &LightmapGI::get_light_data);
+
+	ClassDB::bind_method(D_METHOD("set_streaming_mode", "mode"), &LightmapGI::set_streaming_mode);
+	ClassDB::bind_method(D_METHOD("get_streaming_mode"), &LightmapGI::get_streaming_mode);
+
+	ClassDB::bind_method(D_METHOD("set_streaming_load_distance", "distance"), &LightmapGI::set_streaming_load_distance);
+	ClassDB::bind_method(D_METHOD("get_streaming_load_distance"), &LightmapGI::get_streaming_load_distance);
+
+	ClassDB::bind_method(D_METHOD("set_streaming_unload_distance", "distance"), &LightmapGI::set_streaming_unload_distance);
+	ClassDB::bind_method(D_METHOD("get_streaming_unload_distance"), &LightmapGI::get_streaming_unload_distance);
+
+	ClassDB::bind_method(D_METHOD("set_streaming_bounds", "bounds"), &LightmapGI::set_streaming_bounds);
+	ClassDB::bind_method(D_METHOD("get_streaming_bounds"), &LightmapGI::get_streaming_bounds);
+
+	ClassDB::bind_method(D_METHOD("request_streaming_load"), &LightmapGI::request_streaming_load);
+	ClassDB::bind_method(D_METHOD("request_streaming_unload"), &LightmapGI::request_streaming_unload);
+	ClassDB::bind_method(D_METHOD("is_streaming_loaded"), &LightmapGI::is_streaming_loaded);
+	ClassDB::bind_method(D_METHOD("is_streaming_load_pending"), &LightmapGI::is_streaming_load_pending);
 
 	ClassDB::bind_method(D_METHOD("set_bake_quality", "bake_quality"), &LightmapGI::set_bake_quality);
 	ClassDB::bind_method(D_METHOD("get_bake_quality"), &LightmapGI::get_bake_quality);
@@ -2144,8 +2839,16 @@ void LightmapGI::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "camera_attributes", PROPERTY_HINT_RESOURCE_TYPE, "CameraAttributesPractical,CameraAttributesPhysical"), "set_camera_attributes", "get_camera_attributes");
 	ADD_GROUP("Gen Probes", "generate_probes_");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "generate_probes_subdiv", PROPERTY_HINT_ENUM, "Disabled,4,8,16,32"), "set_generate_probes", "get_generate_probes");
+	ADD_GROUP("Streaming", "streaming_");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "streaming_mode", PROPERTY_HINT_ENUM, "Disabled,Manual,Camera Distance"), "set_streaming_mode", "get_streaming_mode");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "streaming_load_distance", PROPERTY_HINT_RANGE, "0,4096,0.1,or_greater,suffix:m"), "set_streaming_load_distance", "get_streaming_load_distance");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "streaming_unload_distance", PROPERTY_HINT_RANGE, "0,4096,0.1,or_greater,suffix:m"), "set_streaming_unload_distance", "get_streaming_unload_distance");
+	ADD_PROPERTY(PropertyInfo(Variant::AABB, "streaming_bounds"), "set_streaming_bounds", "get_streaming_bounds");
 	ADD_GROUP("Data", "");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "light_data", PROPERTY_HINT_RESOURCE_TYPE, LightmapGIData::get_class_static()), "set_light_data", "get_light_data");
+
+	ADD_SIGNAL(MethodInfo("streaming_loaded"));
+	ADD_SIGNAL(MethodInfo("streaming_unloaded"));
 
 	BIND_ENUM_CONSTANT(BAKE_QUALITY_LOW);
 	BIND_ENUM_CONSTANT(BAKE_QUALITY_MEDIUM);
@@ -2175,7 +2878,15 @@ void LightmapGI::_bind_methods() {
 	BIND_ENUM_CONSTANT(ENVIRONMENT_MODE_SCENE);
 	BIND_ENUM_CONSTANT(ENVIRONMENT_MODE_CUSTOM_SKY);
 	BIND_ENUM_CONSTANT(ENVIRONMENT_MODE_CUSTOM_COLOR);
+
+	BIND_ENUM_CONSTANT(STREAMING_MODE_DISABLED);
+	BIND_ENUM_CONSTANT(STREAMING_MODE_MANUAL);
+	BIND_ENUM_CONSTANT(STREAMING_MODE_CAMERA_DISTANCE);
 }
 
 LightmapGI::LightmapGI() {
+}
+
+LightmapGI::~LightmapGI() {
+	_streaming_abort_load();
 }

@@ -15,6 +15,34 @@
 	<tutorials>
 		<link title="Using Lightmap global illumination">$DOCS_URL/tutorials/3d/global_illumination/using_lightmap_gi.html</link>
 	</tutorials>
+	<methods>
+		<method name="is_streaming_load_pending" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if a streaming load requested for this lightmap is still in flight on a background thread. See [member streaming_mode].
+			</description>
+		</method>
+		<method name="is_streaming_loaded" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if this lightmap's textures are currently resident in video memory. See [member streaming_mode].
+			</description>
+		</method>
+		<method name="request_streaming_load">
+			<return type="void" />
+			<description>
+				Requests that this lightmap's textures be loaded back into video memory. The load runs on a background thread, and [signal streaming_loaded] is emitted once it completes.
+				[b]Note:[/b] When [member streaming_mode] is [constant STREAMING_MODE_CAMERA_DISTANCE], the request only holds until the next distance evaluation, which stays authoritative for that mode.
+			</description>
+		</method>
+		<method name="request_streaming_unload">
+			<return type="void" />
+			<description>
+				Releases this lightmap's textures from video memory, unbinding them from the meshes they light. Any in-flight load is cancelled first. Emits [signal streaming_unloaded].
+				[b]Note:[/b] When [member streaming_mode] is [constant STREAMING_MODE_CAMERA_DISTANCE], the request only holds until the next distance evaluation, which stays authoritative for that mode.
+			</description>
+		</method>
+	</methods>
 	<members>
 		<member name="bias" type="float" setter="set_bias" getter="get_bias" default="0.0005">
 			The bias to use when computing shadows. Increasing [member bias] can fix shadow acne on the resulting baked lightmap, but can introduce peter-panning (shadows not connecting to their casters). Real-time [Light3D] shadows are not affected by this [member bias] property.
@@ -75,6 +103,22 @@
 			Shadowmasking allows [DirectionalLight3D] nodes to cast shadows even outside the range defined by their [member DirectionalLight3D.directional_shadow_max_distance] property. This is done by baking a texture that contains a shadowmap for the directional light, then using this texture according to the current shadowmask mode.
 			[b]Note:[/b] The shadowmask texture is only created if [member shadowmask_mode] is not [constant LightmapGIData.SHADOWMASK_MODE_NONE]. To see a difference, you need to bake lightmaps again after switching from [constant LightmapGIData.SHADOWMASK_MODE_NONE] to any other mode.
 		</member>
+		<member name="streaming_bounds" type="AABB" setter="set_streaming_bounds" getter="get_streaming_bounds" default="AABB(0, 0, 0, 0, 0, 0)">
+			The region, in the [LightmapGI]'s local space, that camera distance is measured against when [member streaming_mode] is [constant STREAMING_MODE_CAMERA_DISTANCE].
+			If left at its default zero-sized value, the bounds are derived automatically: from the light probe capture bounds when the bake generated probes, and otherwise from the combined extents of the meshes this lightmap lights.
+		</member>
+		<member name="streaming_load_distance" type="float" setter="set_streaming_load_distance" getter="get_streaming_load_distance" default="40.0">
+			Distance from the active [Camera3D] to [member streaming_bounds] at which this lightmap's textures start loading, when [member streaming_mode] is [constant STREAMING_MODE_CAMERA_DISTANCE]. The distance is measured to the closest point of the bounds, so a camera inside them is at distance [code]0.0[/code].
+		</member>
+		<member name="streaming_mode" type="int" setter="set_streaming_mode" getter="get_streaming_mode" enum="LightmapGI.StreamingMode" default="0">
+			Controls whether this lightmap's textures are kept in video memory at all times, or loaded and released on demand. See [enum StreamingMode].
+			Streaming requires the baked textures to exist as separate files on disk, which is the case for any lightmap baked in the editor. Streaming is always disabled while running in the editor.
+			[b]Note:[/b] Only the light and shadowmask textures are streamed. Light probe capture data is kept in system memory, so dynamic objects stay correctly lit even while a section's textures are released.
+		</member>
+		<member name="streaming_unload_distance" type="float" setter="set_streaming_unload_distance" getter="get_streaming_unload_distance" default="60.0">
+			Distance from the active [Camera3D] to [member streaming_bounds] beyond which this lightmap's textures are released, when [member streaming_mode] is [constant STREAMING_MODE_CAMERA_DISTANCE]. The gap between this and [member streaming_load_distance] acts as hysteresis, preventing a camera sitting on a section border from repeatedly loading and releasing the same textures.
+			Values below [member streaming_load_distance] are clamped up to it.
+		</member>
 		<member name="supersampling" type="bool" setter="set_supersampling_enabled" getter="is_supersampling_enabled" default="false">
 			If [code]true[/code], lightmaps are baked with the texel scale multiplied with [member supersampling_factor] and downsampled before saving the lightmap (so the effective texel density is identical to having supersampling disabled).
 			Supersampling provides increased lightmap quality with less noise, smoother shadows and better shadowing of small-scale features in objects. However, it may result in significantly increased bake times and memory usage while baking lightmaps. Padding is automatically adjusted to avoid increasing light leaking.
@@ -96,6 +140,18 @@
 			[b]Note:[/b] [member use_texture_for_bounces] only has an effect if [member bounces] is set to a value greater than or equal to [code]1[/code].
 		</member>
 	</members>
+	<signals>
+		<signal name="streaming_loaded">
+			<description>
+				Emitted when this lightmap's textures have finished loading and have been bound back to the meshes they light. See [member streaming_mode].
+			</description>
+		</signal>
+		<signal name="streaming_unloaded">
+			<description>
+				Emitted when this lightmap's textures have been unbound from their meshes and released from video memory. See [member streaming_mode].
+			</description>
+		</signal>
+	</signals>
 	<constants>
 		<constant name="BAKE_QUALITY_LOW" value="0" enum="BakeQuality">
 			Low bake quality (fastest bake times). The quality of this preset can be adjusted by changing [member ProjectSettings.rendering/lightmapping/bake_quality/low_quality_ray_count] and [member ProjectSettings.rendering/lightmapping/bake_quality/low_quality_probe_ray_count].
@@ -172,6 +228,15 @@
 		</constant>
 		<constant name="ENVIRONMENT_MODE_CUSTOM_COLOR" value="3" enum="EnvironmentMode">
 			Use [member environment_custom_color] multiplied by [member environment_custom_energy] as a constant source of environment lighting when baking lightmaps.
+		</constant>
+		<constant name="STREAMING_MODE_DISABLED" value="0" enum="StreamingMode">
+			The lightmap textures are loaded together with the scene and stay in video memory for as long as the [LightmapGI] node exists. This is the behavior of lightmaps that do not opt into streaming.
+		</constant>
+		<constant name="STREAMING_MODE_MANUAL" value="1" enum="StreamingMode">
+			The lightmap textures are released as soon as the node enters the tree, and are only loaded when [method request_streaming_load] is called. Use this to drive residency from your own level or section streaming logic.
+		</constant>
+		<constant name="STREAMING_MODE_CAMERA_DISTANCE" value="2" enum="StreamingMode">
+			The lightmap textures are loaded and released automatically based on the distance from the active [Camera3D] to [member streaming_bounds], using [member streaming_load_distance] and [member streaming_unload_distance].
 		</constant>
 	</constants>
 </class>
