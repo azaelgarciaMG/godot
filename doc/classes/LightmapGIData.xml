@@ -25,6 +25,43 @@
 				Clear all objects that are considered baked within this [LightmapGIData].
 			</description>
 		</method>
+		<method name="get_capture_bounds" qualifiers="const">
+			<return type="AABB" />
+			<description>
+				Returns the bounds of the baked light probes, in the local space of the [LightmapGI] node that baked them.
+			</description>
+		</method>
+		<method name="get_capture_bsp_tree" qualifiers="const">
+			<return type="PackedInt32Array" />
+			<description>
+				Returns the BSP tree used to look up which tetrahedron of [method get_capture_tetrahedra] contains a given point. Every 6 integers describe one node: the 4 coefficients of the splitting plane, followed by the "over" and "under" children (a negative value is the bitwise complement of a tetrahedron index, i.e. a leaf).
+			</description>
+		</method>
+		<method name="get_capture_point_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of baked light probes. This is the number of elements in [method get_capture_points], and one ninth of the number of elements in [method get_capture_sh].
+			</description>
+		</method>
+		<method name="get_capture_points" qualifiers="const">
+			<return type="PackedVector3Array" />
+			<description>
+				Returns the positions of the baked light probes, in the local space of the [LightmapGI] node that baked them. The lighting captured at each of these positions is returned by [method get_capture_sh].
+				[b]Note:[/b] Light probes are only baked if [member LightmapGI.generate_probes_subdiv] is not [constant LightmapGI.GENERATE_PROBES_DISABLED], or if [LightmapProbe] nodes are present in the scene.
+			</description>
+		</method>
+		<method name="get_capture_sh" qualifiers="const">
+			<return type="PackedColorArray" />
+			<description>
+				Returns the spherical harmonics of the baked light probes: 9 L2 coefficients per probe, in the same order as [method get_capture_points]. In other words, the coefficients of the probe at index [code]i[/code] are the elements in the range [code][i * 9, i * 9 + 9)[/code].
+			</description>
+		</method>
+		<method name="get_capture_tetrahedra" qualifiers="const">
+			<return type="PackedInt32Array" />
+			<description>
+				Returns the Delaunay tetrahedralization of the baked light probes, used to interpolate lighting between them. Every 4 integers are indices into [method get_capture_points] describing the corners of one tetrahedron.
+			</description>
+		</method>
 		<method name="get_user_count" qualifiers="const">
 			<return type="int" />
 			<description>
@@ -36,6 +73,12 @@
 			<param index="0" name="user_idx" type="int" />
 			<description>
 				Returns the [NodePath] of the baked object at index [param user_idx].
+			</description>
+		</method>
+		<method name="is_interior" qualifiers="const">
+			<return type="bool" />
+			<description>
+				If [code]true[/code], the lightmap was baked with environment lighting ignored. See also [member LightmapGI.interior].
 			</description>
 		</method>
 		<method name="is_using_spherical_harmonics" qualifiers="const">

@@ -243,10 +243,18 @@ void LightmapGIData::set_capture_data(const AABB &p_bounds, bool p_interior, con
 		RS::get_singleton()->lightmap_set_probe_capture_data(lightmap, p_points, p_point_sh, p_tetrahedra, p_bsp_tree);
 		RS::get_singleton()->lightmap_set_probe_bounds(lightmap, p_bounds);
 		RS::get_singleton()->lightmap_set_probe_interior(lightmap, p_interior);
+		capture_points = p_points;
+		capture_sh = p_point_sh;
+		capture_tetrahedra = p_tetrahedra;
+		capture_bsp_tree = p_bsp_tree;
 	} else {
 		RS::get_singleton()->lightmap_set_probe_capture_data(lightmap, PackedVector3Array(), PackedColorArray(), PackedInt32Array(), PackedInt32Array());
 		RS::get_singleton()->lightmap_set_probe_bounds(lightmap, AABB());
 		RS::get_singleton()->lightmap_set_probe_interior(lightmap, false);
+		capture_points.clear();
+		capture_sh.clear();
+		capture_tetrahedra.clear();
+		capture_bsp_tree.clear();
 	}
 	RS::get_singleton()->lightmap_set_baked_exposure_normalization(lightmap, p_baked_exposure);
 	baked_exposure = p_baked_exposure;
@@ -255,20 +263,24 @@ void LightmapGIData::set_capture_data(const AABB &p_bounds, bool p_interior, con
 	bounds = p_bounds;
 }
 
+int LightmapGIData::get_capture_point_count() const {
+	return capture_points.size();
+}
+
 PackedVector3Array LightmapGIData::get_capture_points() const {
-	return RS::get_singleton()->lightmap_get_probe_capture_points(lightmap);
+	return capture_points;
 }
 
 PackedColorArray LightmapGIData::get_capture_sh() const {
-	return RS::get_singleton()->lightmap_get_probe_capture_sh(lightmap);
+	return capture_sh;
 }
 
 PackedInt32Array LightmapGIData::get_capture_tetrahedra() const {
-	return RS::get_singleton()->lightmap_get_probe_capture_tetrahedra(lightmap);
+	return capture_tetrahedra;
 }
 
 PackedInt32Array LightmapGIData::get_capture_bsp_tree() const {
-	return RS::get_singleton()->lightmap_get_probe_capture_bsp_tree(lightmap);
+	return capture_bsp_tree;
 }
 
 uint32_t LightmapGIData::get_lightprobe_hash() const {
@@ -361,6 +373,14 @@ void LightmapGIData::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("_set_probe_data", "data"), &LightmapGIData::_set_probe_data);
 	ClassDB::bind_method(D_METHOD("_get_probe_data"), &LightmapGIData::_get_probe_data);
+
+	ClassDB::bind_method(D_METHOD("get_capture_point_count"), &LightmapGIData::get_capture_point_count);
+	ClassDB::bind_method(D_METHOD("get_capture_points"), &LightmapGIData::get_capture_points);
+	ClassDB::bind_method(D_METHOD("get_capture_sh"), &LightmapGIData::get_capture_sh);
+	ClassDB::bind_method(D_METHOD("get_capture_tetrahedra"), &LightmapGIData::get_capture_tetrahedra);
+	ClassDB::bind_method(D_METHOD("get_capture_bsp_tree"), &LightmapGIData::get_capture_bsp_tree);
+	ClassDB::bind_method(D_METHOD("get_capture_bounds"), &LightmapGIData::get_capture_bounds);
+	ClassDB::bind_method(D_METHOD("is_interior"), &LightmapGIData::is_interior);
 
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "lightmap_textures", PROPERTY_HINT_ARRAY_TYPE, "TextureLayered", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_READ_ONLY), "set_lightmap_textures", "get_lightmap_textures");
 	ADD_PROPERTY(PropertyInfo(Variant::ARRAY, "shadowmask_textures", PROPERTY_HINT_ARRAY_TYPE, "TextureLayered", PROPERTY_USAGE_DEFAULT | PROPERTY_USAGE_READ_ONLY), "set_shadowmask_textures", "get_shadowmask_textures");

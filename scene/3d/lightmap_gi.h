@@ -72,6 +72,11 @@ private:
 	float baked_exposure = 1.0;
 	uint32_t lightprobe_hash = 0;
 
+	PackedVector3Array capture_points;
+	PackedColorArray capture_sh;
+	PackedInt32Array capture_tetrahedra;
+	PackedInt32Array capture_bsp_tree;
+
 	struct User {
 		NodePath path;
 		int32_t sub_instance = 0;
@@ -122,6 +127,7 @@ public:
 	float get_baked_exposure() const;
 
 	void set_capture_data(const AABB &p_bounds, bool p_interior, const PackedVector3Array &p_points, const PackedColorArray &p_point_sh, const PackedInt32Array &p_tetrahedra, const PackedInt32Array &p_bsp_tree, float p_baked_exposure, uint32_t p_lightprobe_hash);
+	int get_capture_point_count() const;
 	PackedVector3Array get_capture_points() const;
 	PackedColorArray get_capture_sh() const;
 	PackedInt32Array get_capture_tetrahedra() const;
