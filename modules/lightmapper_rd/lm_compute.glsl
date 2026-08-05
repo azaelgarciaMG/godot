@@ -137,12 +137,17 @@ const uint RAY_ANY = 3;
 
 #ifdef USE_HW_RAYTRACING
 
-// Matches the winding convention the software tracer uses to classify front and back faces.
+// The face normal is what tells a front face from a back one, so every hit needs it. The grid tracer
+// derives it from the three vertices it has already loaded to intersect the triangle, but hardware
+// traversal hands back nothing but a primitive index, which would make that three scattered reads
+// into the vertex array on top of the read of the triangle itself. Baking the normal into the
+// triangle instead puts it in the same struct the cull mode is read from.
 vec3 triangle_geometric_normal(uint p_triangle) {
-	vec3 vtx0 = vertices.data[triangles.data[p_triangle].indices.x].position;
-	vec3 vtx1 = vertices.data[triangles.data[p_triangle].indices.y].position;
-	vec3 vtx2 = vertices.data[triangles.data[p_triangle].indices.z].position;
-	return -normalize(cross((vtx0 - vtx1), (vtx0 - vtx2)));
+	uint oct = triangles.data[p_triangle].normal_oct;
+	vec2 e = vec2((uvec2(oct) >> uvec2(0, 16)) & uvec2(0xFFFF)) / 65535.0 * 2.0 - 1.0;
+	vec3 v = vec3(e.xy, 1.0 - abs(e.x) - abs(e.y));
+	v.xy += min(v.z, 0.0) * sign(v.xy);
+	return normalize(v);
 }
 
 // The software tracer pulls front faces one bias towards the ray origin so that a front face always
@@ -237,6 +242,10 @@ uint trace_ray(vec3 p_from, vec3 p_to, bool p_any_hit, out float r_distance, out
 		}
 	}
 
+	// The software tracer also pulls the reported distance of a front face one bias towards the ray
+	// origin, but nothing observes it: the only caller that reads the distance is the unocclude pass,
+	// and only on a back face. The transparency walks reconstruct their hit position from the
+	// barycentrics instead, so both tracers put them on the surface either way.
 	switch (triangles.data[triangle_index].cull_mode) {
 		case CULL_DISABLED:
 			backface = false;

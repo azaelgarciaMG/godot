@@ -251,11 +251,22 @@ void LightmapperRD::_plot_triangle_into_triangle_index_list(int p_size, const Ve
 	}
 }
 
-bool LightmapperRD::_build_raytracing_structures(RenderingDevice *p_rd, const LocalVector<Vertex> &p_vertex_array, const LocalVector<Triangle> &p_triangles, RaytracingStructures &r_structures) {
-	// The acceleration structure build reads positions straight out of a copy of the vertex array,
-	// so the tracer's Vertex stride is reused as-is and only the leading position is described.
-	// Indices are laid out in triangle buffer order, which makes the primitive index reported by a
-	// ray query double as the index into the triangle buffer.
+// Pairs with triangle_geometric_normal() in lm_compute.glsl, using the same octahedral mapping
+// packed into two 16 bit components the rest of the engine encodes normals with. Angular error is
+// well under a thousandth of a degree, far finer than what telling a front face from a back one
+// needs, and it costs nothing: the field it goes into was padding.
+static uint32_t _encode_normal_oct(const Vector3 &p_normal) {
+	const Vector2 oct = p_normal.octahedron_encode();
+	const uint32_t x = uint32_t(CLAMP(oct.x * 65535.0f, 0.0f, 65535.0f));
+	const uint32_t y = uint32_t(CLAMP(oct.y * 65535.0f, 0.0f, 65535.0f));
+	return x | (y << 16);
+}
+
+bool LightmapperRD::_build_raytracing_structures(RenderingDevice *p_rd, RID p_vertex_buffer, uint32_t p_vertex_count, const LocalVector<Triangle> &p_triangles, RaytracingStructures &r_structures) {
+	// The build reads positions straight out of the same buffer the shaders bind, so the tracer's
+	// Vertex stride is reused as-is and only the leading position is described. Indices are laid out
+	// in triangle buffer order, which makes the primitive index reported by a ray query double as the
+	// index into the triangle buffer.
 	LocalVector<uint32_t> indices;
 	indices.resize(p_triangles.size() * 3);
 	for (uint32_t i = 0; i < p_triangles.size(); i++) {
@@ -264,21 +275,15 @@ bool LightmapperRD::_build_raytracing_structures(RenderingDevice *p_rd, const Lo
 		indices[i * 3 + 2] = p_triangles[i].indices[2];
 	}
 
-	const BitField<RD::BufferCreationBits> build_input_bits =
-			RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT;
-
-	r_structures.vertex_buffer = p_rd->vertex_buffer_create(p_vertex_array.size() * sizeof(Vertex), p_vertex_array.span().reinterpret<uint8_t>(), build_input_bits);
-	ERR_FAIL_COND_V(r_structures.vertex_buffer.is_null(), false);
-
-	r_structures.index_buffer = p_rd->index_buffer_create(indices.size(), RD::INDEX_BUFFER_FORMAT_UINT32, indices.span().reinterpret<uint8_t>(), false, build_input_bits);
+	r_structures.index_buffer = p_rd->index_buffer_create(indices.size(), RD::INDEX_BUFFER_FORMAT_UINT32, indices.span().reinterpret<uint8_t>(), false, RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
 	ERR_FAIL_COND_V(r_structures.index_buffer.is_null(), false);
 
 	RD::AccelerationStructureGeometry geometry;
 	geometry.flags = RD::ACCELERATION_STRUCTURE_GEOMETRY_OPAQUE_BIT;
-	geometry.vertex_buffer = r_structures.vertex_buffer;
+	geometry.vertex_buffer = p_vertex_buffer;
 	geometry.vertex_offset = 0;
 	geometry.vertex_stride = sizeof(Vertex);
-	geometry.vertex_count = p_vertex_array.size();
+	geometry.vertex_count = p_vertex_count;
 	geometry.vertex_format = RD::DATA_FORMAT_R32G32B32_SFLOAT;
 	geometry.index_buffer = r_structures.index_buffer;
 	geometry.index_offset = 0;
@@ -620,7 +625,14 @@ void LightmapperRD::_create_acceleration_structures(RenderingDevice *rd, Size2i 
 			if (material.is_valid()) {
 				t.cull_mode = RSG::material_storage->material_get_cull_mode(material);
 			}
-			t.pad1 = 0; //make valgrind not complain
+			// Same expression the grid tracer evaluates per hit, so both paths classify faces identically.
+			Vector3 geometric_normal = -(vtxs[0] - vtxs[1]).cross(vtxs[0] - vtxs[2]);
+			if (geometric_normal.length_squared() > 0.0) {
+				geometric_normal.normalize();
+			} else {
+				geometric_normal = Vector3(0, 0, 1); // Degenerate triangle, no ray can hit it.
+			}
+			t.normal_oct = _encode_normal_oct(geometric_normal);
 			triangles.push_back(t);
 			slice_triangle_count.write[t.slice]++;
 		}
@@ -766,7 +778,15 @@ void LightmapperRD::_create_acceleration_structures(RenderingDevice *rd, Size2i 
 	}
 
 	{ //buffers
-		vertex_buffer = rd->storage_buffer_create(vertex_array.size() * sizeof(Vertex), vertex_array.span().reinterpret<uint8_t>());
+		Span<uint8_t> vb = vertex_array.span().reinterpret<uint8_t>();
+		if (p_use_raytracing) {
+			// One buffer serves both the shaders and the acceleration structure build. It has to be
+			// created as a vertex buffer for blas_create() to accept it, so the storage bit is asked
+			// for explicitly to keep it bindable as the shaders' vertex storage buffer.
+			vertex_buffer = rd->vertex_buffer_create(vb.size(), vb, RD::BUFFER_CREATION_AS_STORAGE_BIT | RD::BUFFER_CREATION_DEVICE_ADDRESS_BIT | RD::BUFFER_CREATION_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT);
+		} else {
+			vertex_buffer = rd->storage_buffer_create(vb.size(), vb);
+		}
 
 		triangle_buffer = rd->storage_buffer_create(triangles.size() * sizeof(Triangle), triangles.span().reinterpret<uint8_t>());
 
@@ -797,7 +817,7 @@ void LightmapperRD::_create_acceleration_structures(RenderingDevice *rd, Size2i 
 	if (p_use_raytracing) {
 		// The tracer indexes the triangle buffer directly with the primitive index reported by the
 		// ray query, which is why the acceleration structure is built from the sorted triangle list.
-		if (!_build_raytracing_structures(rd, vertex_array, triangles, r_raytracing)) {
+		if (!_build_raytracing_structures(rd, vertex_buffer, vertex_array.size(), triangles, r_raytracing)) {
 			ERR_PRINT("Failed to build the raytracing acceleration structures for the lightmap bake.");
 		}
 	} else { //grid
@@ -1288,7 +1308,8 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 	// the uniform grid. The grid path stays in place for devices without ray tracing support.
 	const bool raytracing_supported = rd->has_feature(RD::SUPPORTS_RAY_QUERY);
 	const bool raytracing_requested = GLOBAL_GET("rendering/lightmapping/bake_performance/use_hardware_raytracing");
-	const bool use_raytracing = raytracing_supported && raytracing_requested;
+	// Not const: a failed acceleration structure build falls back to the grid further down.
+	bool use_raytracing = raytracing_supported && raytracing_requested;
 	RaytracingStructures raytracing;
 
 	if (use_raytracing) {
@@ -1460,33 +1481,48 @@ LightmapperRD::BakeError LightmapperRD::bake(BakeQuality p_quality, bool p_use_d
 		rd->free_rid(m_rid); \
 	}
 
+// The acceleration structures go first: a BLAS registers a dependency on the buffers it was built
+// from, so freeing the vertex buffer would take the BLAS down with it and leave the explicit free
+// below with an ID that no longer exists.
 #define FREE_BUFFERS \
-	FREE_RID_IF_VALID(bake_parameters_buffer) \
-	rd->free_rid(vertex_buffer); \
-	rd->free_rid(triangle_buffer); \
-	rd->free_rid(lights_buffer); \
-	rd->free_rid(seams_buffer); \
-	rd->free_rid(probe_positions_buffer); \
-	FREE_RID_IF_VALID(triangle_indices_buffer) \
-	FREE_RID_IF_VALID(cluster_indices_buffer) \
-	FREE_RID_IF_VALID(cluster_aabbs_buffer) \
-	FREE_RID_IF_VALID(grid_texture) \
 	FREE_RID_IF_VALID(raytracing.tlas) \
 	FREE_RID_IF_VALID(raytracing.blas) \
 	FREE_RID_IF_VALID(raytracing.index_buffer) \
-	FREE_RID_IF_VALID(raytracing.vertex_buffer)
+	FREE_RID_IF_VALID(bake_parameters_buffer) \
+	FREE_RID_IF_VALID(vertex_buffer) \
+	FREE_RID_IF_VALID(triangle_buffer) \
+	FREE_RID_IF_VALID(lights_buffer) \
+	FREE_RID_IF_VALID(seams_buffer) \
+	FREE_RID_IF_VALID(probe_positions_buffer) \
+	FREE_RID_IF_VALID(triangle_indices_buffer) \
+	FREE_RID_IF_VALID(cluster_indices_buffer) \
+	FREE_RID_IF_VALID(cluster_aabbs_buffer) \
+	FREE_RID_IF_VALID(grid_texture)
 
 	const uint32_t cluster_size = 16;
 	_create_acceleration_structures(rd, atlas_size, atlas_slices, bounds, grid_size, cluster_size, probe_positions, p_generate_probes, slice_triangle_count, slice_seam_count, vertex_buffer, triangle_buffer, lights_buffer, triangle_indices_buffer, cluster_indices_buffer, cluster_aabbs_buffer, probe_positions_buffer, grid_texture, seams_buffer, use_raytracing, raytracing, p_step_function, p_bake_userdata);
 
 	if (use_raytracing && !raytracing.built) {
-		FREE_TEXTURES
+		// A device can advertise ray query support and still fail to produce the acceleration
+		// structure, running out of video memory on a heavy scene being the realistic case. The grid
+		// is a slower bake rather than no bake, so retry with it instead of failing outright. Nothing
+		// the first attempt created can be kept: the grid path needs the vertex buffer without the
+		// raytracing usage bits, and it has its own set of buffers to fill.
+		WARN_PRINT("Lightmap bake: could not build the raytracing acceleration structures, falling back to the voxel grid.");
+
 		FREE_BUFFERS
-		memdelete(rd);
-		if (rcd != nullptr) {
-			memdelete(rcd);
-		}
-		return BAKE_ERROR_LIGHTMAP_CANT_PRE_BAKE_MESHES;
+		bake_parameters_buffer = RID();
+		vertex_buffer = RID();
+		triangle_buffer = RID();
+		lights_buffer = RID();
+		seams_buffer = RID();
+		probe_positions_buffer = RID();
+		raytracing = RaytracingStructures();
+
+		use_raytracing = false;
+		common_defines = String();
+
+		_create_acceleration_structures(rd, atlas_size, atlas_slices, bounds, grid_size, cluster_size, probe_positions, p_generate_probes, slice_triangle_count, slice_seam_count, vertex_buffer, triangle_buffer, lights_buffer, triangle_indices_buffer, cluster_indices_buffer, cluster_aabbs_buffer, probe_positions_buffer, grid_texture, seams_buffer, use_raytracing, raytracing, p_step_function, p_bake_userdata);
 	}
 
 	// The index of the directional light used for shadowmasking.

@@ -199,7 +199,12 @@ class LightmapperRD : public Lightmapper {
 		float min_bounds[3] = {};
 		uint32_t cull_mode = 0;
 		float max_bounds[3] = {};
-		float pad1 = 0.0;
+		// Octahedron-encoded geometric normal, in the same 16:16 packing the rest of the engine uses.
+		// The hardware tracer needs the face normal on every hit to tell front faces from back ones,
+		// and pulling it from here costs one read out of a struct the hit already touches, instead of
+		// three scattered reads into the vertex array. Unused by the grid tracer, which computes the
+		// normal from the vertices it has to load for the intersection test anyway.
+		uint32_t normal_oct = 0;
 		bool operator<(const Triangle &p_triangle) const {
 			return slice < p_triangle.slice;
 		}
@@ -244,8 +249,9 @@ class LightmapperRD : public Lightmapper {
 	void _sort_triangle_clusters(uint32_t p_cluster_size, uint32_t p_cluster_index, uint32_t p_index_start, uint32_t p_count, LocalVector<TriangleSort> &p_triangle_sort, LocalVector<ClusterAABB> &p_cluster_aabb);
 
 	// Resources backing hardware ray tracing. Only created when the device supports ray queries.
+	// The vertex data is not among them: the build reads the buffer the shaders already bind, which
+	// is created with the extra usage bits it needs when this path is taken.
 	struct RaytracingStructures {
-		RID vertex_buffer;
 		RID index_buffer;
 		RID blas;
 		RID tlas;
@@ -254,7 +260,7 @@ class LightmapperRD : public Lightmapper {
 		bool built = false;
 	};
 
-	bool _build_raytracing_structures(RenderingDevice *p_rd, const LocalVector<Vertex> &p_vertex_array, const LocalVector<Triangle> &p_triangles, RaytracingStructures &r_structures);
+	bool _build_raytracing_structures(RenderingDevice *p_rd, RID p_vertex_buffer, uint32_t p_vertex_count, const LocalVector<Triangle> &p_triangles, RaytracingStructures &r_structures);
 
 	struct RasterPushConstant {
 		float atlas_size[2] = {};

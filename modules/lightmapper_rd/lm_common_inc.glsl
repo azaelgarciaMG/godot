@@ -44,7 +44,7 @@ struct Triangle {
 	vec3 min_bounds;
 	uint cull_mode;
 	vec3 max_bounds;
-	uint pad1;
+	uint normal_oct;
 };
 
 struct ClusterAABB {
