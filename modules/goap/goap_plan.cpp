@@ -73,6 +73,29 @@ void GoapPlan::advance() {
 	}
 }
 
+String GoapPlan::_to_string() {
+	String goal_name = goal.is_valid() ? String(goal->get_goal_name()) : String("<none>");
+	if (goal_name.is_empty()) {
+		goal_name = "<unnamed>";
+	}
+
+	Vector<String> names;
+	for (int i = 0; i < actions.size(); i++) {
+		String name = actions[i].is_valid() ? String(actions[i]->get_action_name()) : String("<null>");
+		if (name.is_empty()) {
+			name = "<unnamed>";
+		}
+		if (i == cursor) {
+			// The action that runs next.
+			name = "*" + name;
+		}
+		names.push_back(name);
+	}
+
+	return vformat("<GoapPlan goal=\"%s\" cost=%s step=%d/%d [%s]>",
+			goal_name, rtos(total_cost), cursor, actions.size(), String(" -> ").join(names));
+}
+
 void GoapPlan::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_goal", "goal"), &GoapPlan::set_goal);
 	ClassDB::bind_method(D_METHOD("get_goal"), &GoapPlan::get_goal);

@@ -20,14 +20,17 @@
 		- on success, writes the action's effects into [member world_state] and moves on; on failure, drops the plan and starts over.
 		Nothing here is mandatory. [member process_callback] can be set to [constant PROCESS_CALLBACK_MANUAL] to drive the agent from your own code with [method update], and [GoapPlanner] can be used on its own if you would rather execute plans yourself.
 		[b]Note:[/b] The agent does not replan while a plan is running. Call [method request_plan] when something happens that should make it reconsider right away, such as taking damage.
+		[b]Debugging.[/b] Run the project and open [b]Debugger &gt; GOAP[/b], then press [b]Capture[/b]. The panel lists every agent in the running scene with the goal it settled on, the plan it is executing and the world state it is reasoning over, which is usually faster than reading the signals. See also [method validate] for mistakes that can be caught without running anything.
 	</description>
 	<tutorials>
 	</tutorials>
 	<methods>
 		<method name="abort_plan">
 			<return type="void" />
+			<param index="0" name="reason" type="int" enum="GoapAgent.AbortReason" default="0" />
 			<description>
 				Stops the running action, calling its [method GoapAction._exit] with [code]false[/code], and drops the plan. The agent plans again on its next step, subject to [member replan_delay].
+				[param reason] is passed straight through to [signal plan_aborted], so a caller can tell listeners why it intervened.
 			</description>
 		</method>
 		<method name="erase_state">
@@ -55,6 +58,12 @@
 				Returns the plan being executed, or [code]null[/code] if there is none.
 			</description>
 		</method>
+		<method name="get_last_plan_result" qualifiers="const">
+			<return type="int" enum="GoapPlanner.PlanResult" />
+			<description>
+				Returns why the last planning attempt ended the way it did. See [method GoapPlanner.get_last_result].
+			</description>
+		</method>
 		<method name="get_state" qualifiers="const">
 			<return type="Variant" />
 			<param index="0" name="key" type="StringName" />
@@ -70,10 +79,18 @@
 				Returns [code]true[/code] if the fact [param key] is present in [member world_state]. Shorthand for [method GoapContext.has_state] on [member context].
 			</description>
 		</method>
+		<method name="is_idle" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] when the agent has no plan because there was nothing worth doing, as opposed to having failed to find one. An agent whose goals are all satisfied is idle; one whose goals are out of reach is not.
+				Use this to tell the two cases apart instead of treating every [signal planning_failed] as a problem.
+			</description>
+		</method>
 		<method name="request_plan">
 			<return type="bool" />
 			<description>
-				Drops the running plan and plans again immediately, ignoring [member replan_delay]. Returns [code]true[/code] if a plan was found.
+				Drops the running plan and plans again immediately, ignoring [member replan_delay] and [member async_planning]. Returns [code]true[/code] if a plan was found.
+				The search always runs to completion here, because the caller is asking for an answer right now.
 			</description>
 		</method>
 		<method name="set_state">
@@ -83,6 +100,18 @@
 			<description>
 				Sets the fact [param key] in [member world_state] to [param value]. Shorthand for [method GoapContext.set_state] on [member context].
 				This does not interrupt the running plan; follow it with [method request_plan] when it should.
+			</description>
+		</method>
+		<method name="validate" qualifiers="const">
+			<return type="PackedStringArray" />
+			<description>
+				Returns a list of authoring mistakes found in this agent's actions and goals: facts a goal asks for that no action produces, preconditions nothing can establish, and comparison strings that do not parse. These are the failures that otherwise show up only as a planner that silently never finds a plan.
+				[codeblock]
+				# "have_wood" when every action produces "has_wood" is caught here.
+				for warning in $GoapAgent.validate():
+				    push_warning(warning)
+				[/codeblock]
+				The same list drives the node's configuration warnings in the editor. Actions and goals that build their preconditions, effects or desired state from script are skipped, since there is nothing static to check.
 			</description>
 		</method>
 		<method name="update">
@@ -98,6 +127,10 @@
 			Everything this agent knows how to do. Assigning a new array drops the running plan.
 			Actions the agent cannot currently perform are better left in place and rejected through [method GoapAction._is_valid] than added and removed at runtime.
 		</member>
+		<member name="async_planning" type="bool" setter="set_async_planning" getter="is_async_planning" default="false">
+			If [code]true[/code], the search is spread over several frames at [member planning_budget] nodes each instead of blocking on it. Worth enabling once a scene holds enough agents that a single frame's planning shows up in a profile.
+			The search still runs on the main thread, so actions and goals keep their usual access to the scene tree. Agents using this must each own their [member planner], since it holds the in-flight search.
+		</member>
 		<member name="active" type="bool" setter="set_active" getter="is_active" default="true">
 			If [code]false[/code], the agent stops planning and executing, and drops any running plan. Use it to hand control to a cutscene or another behavior.
 		</member>
@@ -111,6 +144,9 @@
 		<member name="planner" type="GoapPlanner" setter="set_planner" getter="get_planner">
 			The planner used to build plans. The agent creates one on its own; assign a different one to tune its search limits or to share it between agents.
 			Setting this to [code]null[/code] restores a default planner rather than leaving the agent without one.
+		</member>
+		<member name="planning_budget" type="int" setter="set_planning_budget" getter="get_planning_budget" default="64">
+			How many search nodes a single frame may expand while [member async_planning] is on. Lower values spread the cost further at the price of taking longer to reach a plan.
 		</member>
 		<member name="process_callback" type="int" setter="set_process_callback" getter="get_process_callback" enum="GoapAgent.ProcessCallback" default="0">
 			When the agent steps itself. Use [constant PROCESS_CALLBACK_MANUAL] and call [method update] yourself to run several agents on a rotation instead of all of them every frame.
@@ -126,8 +162,10 @@
 		<signal name="action_finished">
 			<param index="0" name="action" type="GoapAction" />
 			<param index="1" name="succeeded" type="bool" />
+			<param index="2" name="result" type="int" />
 			<description>
 				Emitted after an action's [method GoapAction._exit] runs, whether it succeeded, failed, or was interrupted.
+				[param result] is an [enum ActionResult]. It separates an action that reported [constant GoapAction.STATUS_FAILED] from one that was cut short by a replan, which [param succeeded] alone cannot express.
 			</description>
 		</signal>
 		<signal name="action_started">
@@ -137,8 +175,9 @@
 			</description>
 		</signal>
 		<signal name="plan_aborted">
+			<param index="0" name="reason" type="int" />
 			<description>
-				Emitted when a plan is dropped before finishing, because an action failed, its preconditions no longer held, or [method abort_plan] was called.
+				Emitted when a plan is dropped before finishing. [param reason] is an [enum AbortReason]: it says whether an action failed, the world moved on, or something asked for a replan.
 			</description>
 		</signal>
 		<signal name="plan_completed">
@@ -153,8 +192,9 @@
 			</description>
 		</signal>
 		<signal name="planning_failed">
+			<param index="0" name="result" type="int" />
 			<description>
-				Emitted when no goal could be planned for. Connect it while tuning an agent: it usually means a fact is missing from [member world_state], or that no action provides what the goals ask for.
+				Emitted when no plan was produced. [param result] is a [enum GoapPlanner.PlanResult] saying why, which matters because this also fires — every [member replan_delay], indefinitely — for an agent whose goals are simply all satisfied. Compare against [constant GoapPlanner.PLAN_RESULT_IDLE], or call [method is_idle], before treating it as a problem.
 			</description>
 		</signal>
 	</signals>
@@ -167,6 +207,30 @@
 		</constant>
 		<constant name="PROCESS_CALLBACK_MANUAL" value="2" enum="ProcessCallback">
 			Do not step the agent automatically; call [method update] instead.
+		</constant>
+		<constant name="ABORT_REASON_REQUESTED" value="0" enum="AbortReason">
+			[method abort_plan] or [method request_plan] was called, or [member actions] or [member goals] was reassigned.
+		</constant>
+		<constant name="ABORT_REASON_ACTION_FAILED" value="1" enum="AbortReason">
+			The running action returned [constant GoapAction.STATUS_FAILED].
+		</constant>
+		<constant name="ABORT_REASON_ACTION_INVALID" value="2" enum="AbortReason">
+			[method GoapAction._is_valid] turned [code]false[/code] before the next action could start.
+		</constant>
+		<constant name="ABORT_REASON_PRECONDITIONS_STALE" value="3" enum="AbortReason">
+			The next action's preconditions no longer hold; the world moved on since the plan was built. The action never started, so no [signal action_finished] accompanies this.
+		</constant>
+		<constant name="ABORT_REASON_PLAN_INVALID" value="4" enum="AbortReason">
+			The plan held a [code]null[/code] action.
+		</constant>
+		<constant name="ACTION_RESULT_SUCCEEDED" value="0" enum="ActionResult">
+			The action reported [constant GoapAction.STATUS_SUCCEEDED].
+		</constant>
+		<constant name="ACTION_RESULT_FAILED" value="1" enum="ActionResult">
+			The action reported [constant GoapAction.STATUS_FAILED].
+		</constant>
+		<constant name="ACTION_RESULT_INTERRUPTED" value="2" enum="ActionResult">
+			The action was cut short because the plan was dropped out from under it.
 		</constant>
 	</constants>
 </class>

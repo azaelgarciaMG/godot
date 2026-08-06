@@ -5,4 +5,11 @@ Import("env")
 Import("env_modules")
 
 env_goap = env_modules.Clone()
-env_goap.add_source_files(env.modules_sources, "*.cpp")
+
+module_obj = []
+env_goap.add_source_files(module_obj, "*.cpp")
+
+if env.editor_build:
+    env_goap.add_source_files(module_obj, "editor/*.cpp")
+
+env.modules_sources += module_obj

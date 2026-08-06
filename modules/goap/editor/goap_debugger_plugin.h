@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  goap_plan.h                                                           */
+/*  goap_debugger_plugin.h                                                */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -30,49 +30,85 @@
 
 #pragma once
 
-#include "goap_action.h"
-#include "goap_goal.h"
+#include "../goap_debugger.h"
 
-#include "core/object/ref_counted.h"
-#include "core/variant/typed_array.h"
+#include "editor/debugger/editor_debugger_plugin.h"
+#include "editor/plugins/editor_plugin.h"
+#include "scene/gui/box_container.h"
 
-// The ordered list of actions GoapPlanner found for a goal, plus a cursor
-// tracking how far the agent has executed it.
-class GoapPlan : public RefCounted {
-	GDCLASS(GoapPlan, RefCounted);
+class Button;
+class Label;
+class LineEdit;
+class Tree;
+class TreeItem;
 
-	Ref<GoapGoal> goal;
-	Vector<Ref<GoapAction>> actions;
-	double total_cost = 0.0;
-	int cursor = 0;
+// The "GOAP" tab in the debugger. Lists every agent in the running game with
+// the goal it settled on, the plan it is executing and the world state it is
+// reasoning over — the view you would otherwise have to build as an in-game
+// HUD to work out why an agent is doing what it is doing.
+class GoapDebuggerPanel : public VBoxContainer {
+	GDCLASS(GoapDebuggerPanel, VBoxContainer);
+
+	Button *capture_button = nullptr;
+	LineEdit *filter = nullptr;
+	Label *status = nullptr;
+	Tree *agent_tree = nullptr;
+	Tree *plan_tree = nullptr;
+	Tree *state_tree = nullptr;
+
+	Vector<GoapDebugger::AgentInfo> agents;
+	// Kept across refreshes so a selected agent stays selected while it updates.
+	String selected_path;
+	bool capturing = false;
+
+	void _capture_toggled(bool p_pressed);
+	void _filter_changed(const String &p_text);
+	void _agent_selected();
+
+	void _update_agent_tree();
+	void _update_details();
+	const GoapDebugger::AgentInfo *_find_selected() const;
+
+	static String _result_name(int p_result);
+
+protected:
+	void _notification(int p_what);
+	static void _bind_methods();
+
+public:
+	// Feeds a snapshot that arrived from the running game.
+	void set_agents(const Vector<GoapDebugger::AgentInfo> &p_agents);
+
+	void started();
+	void stopped();
+
+	GoapDebuggerPanel();
+};
+
+class GoapEditorDebugger : public EditorDebuggerPlugin {
+	GDCLASS(GoapEditorDebugger, EditorDebuggerPlugin);
+
+	HashMap<int, GoapDebuggerPanel *> panels;
+
+	void _capture_toggled(bool p_enable, int p_session_id);
 
 protected:
 	static void _bind_methods();
 
-	// Renders the goal, the cost and the action list, marking the action the
-	// cursor is on with a `*`. Makes `print(plan)` useful for debugging.
-	virtual String _to_string() override;
+public:
+	virtual bool has_capture(const String &p_capture) const override;
+	virtual bool capture(const String &p_message, const Array &p_data, int p_session) override;
+	virtual void setup_session(int p_session_id) override;
+};
+
+class GoapEditorPlugin : public EditorPlugin {
+	GDCLASS(GoapEditorPlugin, EditorPlugin);
+
+	Ref<GoapEditorDebugger> debugger;
+
+protected:
+	void _notification(int p_what);
 
 public:
-	void set_goal(const Ref<GoapGoal> &p_goal) { goal = p_goal; }
-	Ref<GoapGoal> get_goal() const { return goal; }
-
-	void set_actions(const Vector<Ref<GoapAction>> &p_actions);
-	const Vector<Ref<GoapAction>> &get_action_list() const { return actions; }
-	TypedArray<GoapAction> get_actions() const;
-	void set_actions_typed(const TypedArray<GoapAction> &p_actions);
-
-	void set_total_cost(double p_cost) { total_cost = p_cost; }
-	double get_total_cost() const { return total_cost; }
-
-	int get_action_count() const { return actions.size(); }
-	Ref<GoapAction> get_action(int p_index) const;
-
-	// Execution cursor.
-	Ref<GoapAction> get_current_action() const;
-	int get_cursor() const { return cursor; }
-	void advance();
-	void reset() { cursor = 0; }
-	bool is_finished() const { return cursor >= actions.size(); }
-	bool is_empty() const { return actions.is_empty(); }
+	GoapEditorPlugin();
 };

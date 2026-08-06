@@ -67,5 +67,9 @@ public:
 	double get_effective_priority(const Ref<GoapContext> &p_context) const;
 	Dictionary get_effective_desired_state(const Ref<GoapContext> &p_context) const;
 
+	// True when the desired state is computed from script instead of exported,
+	// in which case static validation cannot inspect it.
+	bool has_dynamic_desired_state() const;
+
 	bool is_satisfied(const Dictionary &p_world_state, const Ref<GoapContext> &p_context) const;
 };

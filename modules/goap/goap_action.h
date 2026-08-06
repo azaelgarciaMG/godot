@@ -93,6 +93,11 @@ public:
 	Dictionary get_effective_preconditions(const Ref<GoapContext> &p_context) const;
 	Dictionary get_effective_effects(const Ref<GoapContext> &p_context) const;
 
+	// True when the resource computes these from script instead of exporting
+	// them, in which case static validation cannot inspect them.
+	bool has_dynamic_preconditions() const;
+	bool has_dynamic_effects() const;
+
 	// Convenience for callers that only have a plain world state dictionary.
 	bool check_preconditions(const Dictionary &p_world_state, const Ref<GoapContext> &p_context) const;
 	Dictionary apply_effects(const Dictionary &p_world_state, const Ref<GoapContext> &p_context) const;

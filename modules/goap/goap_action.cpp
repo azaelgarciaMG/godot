@@ -90,21 +90,26 @@ Dictionary GoapAction::get_effective_effects(const Ref<GoapContext> &p_context) 
 	return effects;
 }
 
+bool GoapAction::has_dynamic_preconditions() const {
+	return GDVIRTUAL_IS_OVERRIDDEN(_get_preconditions);
+}
+
+bool GoapAction::has_dynamic_effects() const {
+	return GDVIRTUAL_IS_OVERRIDDEN(_get_effects);
+}
+
 bool GoapAction::check_preconditions(const Dictionary &p_world_state, const Ref<GoapContext> &p_context) const {
 	GoapState state;
 	state.from_dictionary(p_world_state);
-	GoapState conditions;
+	GoapConditions conditions;
 	conditions.from_dictionary(get_effective_preconditions(p_context));
-	return state.satisfies(conditions);
+	return conditions.satisfied_by(state);
 }
 
 Dictionary GoapAction::apply_effects(const Dictionary &p_world_state, const Ref<GoapContext> &p_context) const {
-	Dictionary result = p_world_state.duplicate();
-	const Dictionary action_effects = get_effective_effects(p_context);
-	for (const KeyValue<Variant, Variant> &E : action_effects) {
-		result[E.key] = E.value;
-	}
-	return result;
+	GoapEffects action_effects;
+	action_effects.from_dictionary(get_effective_effects(p_context));
+	return action_effects.apply_to(p_world_state);
 }
 
 void GoapAction::enter(const Ref<GoapContext> &p_context) {

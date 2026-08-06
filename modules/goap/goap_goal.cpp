@@ -71,12 +71,16 @@ Dictionary GoapGoal::get_effective_desired_state(const Ref<GoapContext> &p_conte
 	return desired_state;
 }
 
+bool GoapGoal::has_dynamic_desired_state() const {
+	return GDVIRTUAL_IS_OVERRIDDEN(_get_desired_state);
+}
+
 bool GoapGoal::is_satisfied(const Dictionary &p_world_state, const Ref<GoapContext> &p_context) const {
 	GoapState state;
 	state.from_dictionary(p_world_state);
-	GoapState conditions;
+	GoapConditions conditions;
 	conditions.from_dictionary(get_effective_desired_state(p_context));
-	return state.satisfies(conditions);
+	return conditions.satisfied_by(state);
 }
 
 void GoapGoal::_bind_methods() {

@@ -165,9 +165,19 @@
 		</member>
 		<member name="effects" type="Dictionary" setter="set_effects" getter="get_effects" default="{}">
 			The facts the planner assumes will hold once this action has succeeded. An action with no effects is skipped, since it can never bring a goal closer.
+			A value written as [code]"+=1"[/code] or [code]"-=2"[/code] adds to the fact rather than replacing it, which is what lets an action model spending or gathering a resource:
+			[codeblock]
+			# Trade one wood for one gold, repeatably.
+			preconditions = {&amp;"wood": "&gt;=1"}
+			effects = {&amp;"wood": "-=1", &amp;"gold": "+=1"}
+			[/codeblock]
+			Planning backwards through a delta rolls the requirement back by the same amount, so the wood every later trade needs accumulates into what the earlier ones require. A plan is only produced when the agent can actually afford the whole chain.
+			Any other value, including a string that starts with an operator but is not followed by a number, is assigned as-is.
 		</member>
 		<member name="preconditions" type="Dictionary" setter="set_preconditions" getter="get_preconditions" default="{}">
 			The facts that must hold in [member GoapContext.world_state] before this action can run. They are checked during planning and again just before the action starts, so a plan built a moment ago is never executed against a world that has changed underneath it.
+			A value written as a comparison string states a numeric threshold instead of an exact match: [code]"&gt;=3"[/code], [code]"&gt;3"[/code], [code]"&lt;=3"[/code], [code]"&lt;3"[/code] and [code]"==3"[/code]. Anything else, including a string that starts with an operator but is not followed by a number, is matched literally.
+			A fact a comparison names but [member GoapContext.world_state] does not is read as [code]0[/code], so counters do not have to be seeded before use.
 		</member>
 	</members>
 	<constants>

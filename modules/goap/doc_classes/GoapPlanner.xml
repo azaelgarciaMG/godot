@@ -5,15 +5,17 @@
 	</brief_description>
 	<description>
 		The search runs [i]backwards[/i]: it starts from the goal's desired state and works towards the current world state, considering only actions that close a condition which is still open. That keeps the branching factor tied to the size of the goal rather than to the size of the action set, so adding actions an agent rarely needs costs little.
-		At each step an action is kept when it satisfies at least one open condition and undoes none of the others; what it provides is then struck from the open set and what it requires is added in its place. A plan is complete once every remaining condition already holds in the world state.
+		At each step an action is kept when it moves at least one open condition towards being met and contradicts none of the others; what it provides is then struck from the open set and what it requires is added in its place. A plan is complete once every remaining condition already holds in the world state.
 		Each [GoapAgent] owns a planner, so there is usually no need to create one. Doing so is still useful to inspect what an agent would decide:
 		[codeblock]
 		var planner = GoapPlanner.new()
 		var plan = planner.plan(agent.context, agent.actions, agent.goals)
 		if plan == null:
-		    print("No reachable goal (%d/%d nodes explored)" % [planner.get_last_iterations(), planner.max_iterations])
+		    print("No plan: %s" % planner.get_last_result())
 		[/codeblock]
-		[b]Note:[/b] Planning is synchronous. With the default limits it is cheap enough to run from [method Node._process], but a large action set combined with a distant goal can take long enough to matter; use [member GoapAgent.replan_delay] to control how often it happens.
+		[b]Optimality.[/b] With the default [constant HEURISTIC_ADMISSIBLE] the planner returns the cheapest plan that fits within [member max_plan_length]. Its heuristic never overestimates the remaining cost, which is what that guarantee rests on; it is also consistent, so a state is never re-opened once it has been reached. [constant HEURISTIC_GREEDY] gives that guarantee up in exchange for reaching a plan in far fewer expansions.
+		[b]Snapshotting.[/b] [method GoapAction._is_valid], [method GoapAction._get_cost], [method GoapAction._get_preconditions] and [method GoapAction._get_effects] are evaluated [i]once per planning query[/i], not once per search node. Preconditions that vary with the context therefore do not vary [i]within[/i] a single plan; they are re-read the next time the agent plans. This keeps the inner loop free of script calls.
+		[b]Note:[/b] [method plan] is synchronous. For a crowd, use [method plan_begin] and [method plan_step] — or simply [member GoapAgent.async_planning] — to spread the search over several frames.
 	</description>
 	<tutorials>
 	</tutorials>
@@ -21,7 +23,19 @@
 		<method name="get_last_iterations" qualifiers="const">
 			<return type="int" />
 			<description>
-				Returns the number of search nodes the last query expanded. When it equals [member max_iterations], the search ran out of budget rather than proving the goal unreachable, and raising the limit may produce a plan.
+				Returns the number of search nodes the last query expanded, summed over every goal it tried. Prefer [method get_last_result] over comparing this against [member max_iterations] by hand.
+			</description>
+		</method>
+		<method name="get_last_result" qualifiers="const">
+			<return type="int" enum="GoapPlanner.PlanResult" />
+			<description>
+				Returns why the last query ended the way it did. This is the difference between an agent that has nothing worth doing ([constant PLAN_RESULT_IDLE]), one whose goals are out of reach ([constant PLAN_RESULT_UNREACHABLE]) and one whose search simply ran out of room ([constant PLAN_RESULT_BUDGET_EXHAUSTED] or [constant PLAN_RESULT_DEPTH_EXCEEDED]).
+			</description>
+		</method>
+		<method name="is_planning" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] while a time-sliced query started by [method plan_begin] is still running.
 			</description>
 		</method>
 		<method name="plan">
@@ -30,8 +44,33 @@
 			<param index="1" name="actions" type="GoapAction[]" />
 			<param index="2" name="goals" type="GoapGoal[]" />
 			<description>
-				Returns a plan for the highest priority goal that is valid, not yet satisfied and reachable, or [code]null[/code] when no goal qualifies.
+				Returns a plan for the highest priority goal that is valid, not yet satisfied and reachable, or [code]null[/code] when no goal qualifies. Check [method get_last_result] to tell the reasons apart.
 				Goals are tried from the highest [member GoapGoal.priority] down, ties being broken by their order in [param goals]. Goals that are already satisfied need no work and are passed over.
+			</description>
+		</method>
+		<method name="plan_begin">
+			<return type="void" />
+			<param index="0" name="context" type="GoapContext" />
+			<param index="1" name="actions" type="GoapAction[]" />
+			<param index="2" name="goals" type="GoapGoal[]" />
+			<description>
+				Starts a time-sliced query and returns immediately. Call [method plan_step] until it returns [code]true[/code], then [method take_plan] to collect the result.
+				The search runs on the calling thread, so [GoapAction] and [GoapGoal] callbacks keep their usual access to the scene tree. A planner can only run one query at a time, so agents using this must not share a [GoapPlanner].
+			</description>
+		</method>
+		<method name="plan_begin_for_goal">
+			<return type="void" />
+			<param index="0" name="context" type="GoapContext" />
+			<param index="1" name="actions" type="GoapAction[]" />
+			<param index="2" name="goal" type="GoapGoal" />
+			<description>
+				Like [method plan_begin], but for [param goal] alone.
+			</description>
+		</method>
+		<method name="plan_cancel">
+			<return type="void" />
+			<description>
+				Drops a time-sliced query without collecting its result.
 			</description>
 		</method>
 		<method name="plan_for_goal">
@@ -40,16 +79,62 @@
 			<param index="1" name="actions" type="GoapAction[]" />
 			<param index="2" name="goal" type="GoapGoal" />
 			<description>
-				Returns a plan for [param goal] alone, ignoring priorities. Returns [code]null[/code] when the goal cannot be reached, and a plan with no actions when it is already satisfied.
+				Returns a plan for [param goal] alone, ignoring priorities and [method GoapGoal._is_valid]. Returns [code]null[/code] when the goal cannot be reached, and a plan with no actions when it is already satisfied.
+			</description>
+		</method>
+		<method name="plan_step">
+			<return type="bool" />
+			<param index="0" name="max_iterations" type="int" default="0" />
+			<description>
+				Expands at most [param max_iterations] search nodes of the query started by [method plan_begin], or runs it to completion when [param max_iterations] is [code]0[/code] or less. Returns [code]true[/code] once the search is over.
+			</description>
+		</method>
+		<method name="take_plan">
+			<return type="GoapPlan" />
+			<description>
+				Hands over the plan a finished time-sliced query produced and clears the search. Returns [code]null[/code] when the query failed or is still running.
 			</description>
 		</method>
 	</methods>
 	<members>
+		<member name="heuristic_mode" type="int" setter="set_heuristic_mode" getter="get_heuristic_mode" enum="GoapPlanner.HeuristicMode" default="0">
+			Whether the planner promises the cheapest plan or merely a good one. See [enum HeuristicMode].
+		</member>
 		<member name="max_iterations" type="int" setter="set_max_iterations" getter="get_max_iterations" default="1000">
-			How many search nodes a single query may expand before giving up. It bounds the time planning can take when a goal is unreachable through a large action set.
+			How many search nodes a single goal's search may expand before giving up. It bounds the time planning can take when a goal is unreachable through a large action set. Exceeding it reports [constant PLAN_RESULT_BUDGET_EXHAUSTED].
 		</member>
 		<member name="max_plan_length" type="int" setter="set_max_plan_length" getter="get_max_plan_length" default="16">
-			The longest chain of actions the planner will build. Plans much longer than a handful of steps tend to be invalidated by the world before they finish, so a low limit is usually the right call.
+			The longest chain of actions the planner will build. Plans much longer than a handful of steps tend to be invalidated by the world before they finish, so a low limit is usually the right call. Exceeding it reports [constant PLAN_RESULT_DEPTH_EXCEEDED].
+			[b]Note:[/b] Goals stated as numeric thresholds need one step per unit of progress, so [code]"wood": "&gt;=20"[/code] with an action that adds one wood at a time needs a limit of at least [code]20[/code].
+		</member>
+		<member name="verbose" type="bool" setter="set_verbose" getter="is_verbose" default="false">
+			Prints every node the search pops and every successor it generates. A debugging aid for working out why a plan came out the way it did; it is loud enough that it should not be left on.
 		</member>
 	</members>
+	<constants>
+		<constant name="PLAN_RESULT_SUCCESS" value="0" enum="PlanResult">
+			A plan with at least one action was found.
+		</constant>
+		<constant name="PLAN_RESULT_IDLE" value="1" enum="PlanResult">
+			Every valid goal is already satisfied. The agent has nothing worth doing, which is not a failure.
+		</constant>
+		<constant name="PLAN_RESULT_NO_GOALS" value="2" enum="PlanResult">
+			No goal was supplied, or none of them passed [method GoapGoal._is_valid].
+		</constant>
+		<constant name="PLAN_RESULT_UNREACHABLE" value="3" enum="PlanResult">
+			The search space was exhausted without reaching any goal. Usually a missing action, or a fact no action produces — see [method GoapAgent.validate].
+		</constant>
+		<constant name="PLAN_RESULT_BUDGET_EXHAUSTED" value="4" enum="PlanResult">
+			The search hit [member max_iterations]. A plan may still exist; raising the limit may find it.
+		</constant>
+		<constant name="PLAN_RESULT_DEPTH_EXCEEDED" value="5" enum="PlanResult">
+			The search hit [member max_plan_length]. A longer plan may exist; raising the limit may find it.
+		</constant>
+		<constant name="HEURISTIC_ADMISSIBLE" value="0" enum="HeuristicMode">
+			Guarantees the cheapest plan. The estimate of the work left is scaled by the cheapest action available and divided by how many conditions a single action can close at once, so it never exceeds the true remaining cost.
+		</constant>
+		<constant name="HEURISTIC_GREEDY" value="1" enum="HeuristicMode">
+			Assumes every open fact needs actions of its own. Usually reaches a plan in far fewer expansions, but that plan may cost more than the best one. Worth switching to when planning shows up in a profile and a slightly worse plan is acceptable.
+		</constant>
+	</constants>
 </class>

@@ -51,6 +51,24 @@ public:
 		PROCESS_CALLBACK_MANUAL,
 	};
 
+	// Why the agent stopped executing a plan. Reported by `plan_aborted` so
+	// that a deliberate replan can be told from a genuine failure.
+	enum AbortReason {
+		ABORT_REASON_REQUESTED, // `request_plan`, `abort_plan`, or a new action/goal list.
+		ABORT_REASON_ACTION_FAILED, // The running action returned STATUS_FAILED.
+		ABORT_REASON_ACTION_INVALID, // `_is_valid` turned false before the action started.
+		ABORT_REASON_PRECONDITIONS_STALE, // The world moved on since the plan was built.
+		ABORT_REASON_PLAN_INVALID, // The plan held a null action.
+	};
+
+	// How the action that just stopped ended. Reported by `action_finished`
+	// alongside the `succeeded` flag.
+	enum ActionResult {
+		ACTION_RESULT_SUCCEEDED,
+		ACTION_RESULT_FAILED, // The action itself reported failure.
+		ACTION_RESULT_INTERRUPTED, // Something dropped the plan out from under it.
+	};
+
 private:
 	TypedArray<GoapAction> actions;
 	TypedArray<GoapGoal> goals;
@@ -61,15 +79,20 @@ private:
 	ProcessCallback process_callback = PROCESS_CALLBACK_IDLE;
 	double replan_delay = 0.0;
 	bool active = true;
+	bool async_planning = false;
+	int planning_budget = 64;
 
 	double time_since_planning = 0.0;
 	bool action_running = false;
 	bool has_planned = false;
+	GoapPlanner::PlanResult last_plan_result = GoapPlanner::PLAN_RESULT_NO_GOALS;
 
 	void _update_processing();
-	void _finish_current_action(bool p_succeeded);
+	void _finish_current_action(bool p_succeeded, ActionResult p_result);
 	void _complete_plan();
 	bool _plan();
+	// Turns a finished planner query into `plan_found` / `planning_failed`.
+	bool _collect_plan();
 
 protected:
 	void _notification(int p_what);
@@ -96,6 +119,17 @@ public:
 	void set_replan_delay(double p_delay);
 	double get_replan_delay() const { return replan_delay; }
 
+	// Spreads the search over several frames instead of blocking on it. The
+	// search still runs on the main thread, so action and goal callbacks keep
+	// their usual scene tree access. Agents that enable this must not share a
+	// GoapPlanner instance, since it holds the in-flight search.
+	void set_async_planning(bool p_enabled);
+	bool is_async_planning() const { return async_planning; }
+
+	// Nodes the sliced search may expand per frame.
+	void set_planning_budget(int p_budget);
+	int get_planning_budget() const { return planning_budget; }
+
 	void set_active(bool p_active);
 	bool is_active() const { return active; }
 
@@ -107,14 +141,27 @@ public:
 	void erase_state(const StringName &p_key);
 
 	// Discards the running plan and plans again right away, ignoring
-	// `replan_delay`. Returns `true` when a plan was found.
+	// `replan_delay` and `async_planning`. Returns `true` when a plan was found.
 	bool request_plan();
 	// Stops the running action and drops the plan.
-	void abort_plan();
+	void abort_plan(AbortReason p_reason = ABORT_REASON_REQUESTED);
 
 	Ref<GoapPlan> get_plan() const { return current_plan; }
 	Ref<GoapAction> get_current_action() const;
 	Ref<GoapGoal> get_current_goal() const;
+
+	// Why the last planning attempt ended the way it did.
+	GoapPlanner::PlanResult get_last_plan_result() const { return last_plan_result; }
+	// True when the agent has no plan because there was nothing worth doing,
+	// as opposed to having failed to find one. Distinguishes the two cases
+	// `planning_failed` used to conflate.
+	bool is_idle() const;
+
+	// Reports authoring mistakes: goals asking for facts no action produces,
+	// preconditions nothing can establish, and malformed comparison strings.
+	// Also drives the scene tree's configuration warnings.
+	PackedStringArray validate() const;
+	PackedStringArray get_configuration_warnings() const override;
 
 	// Advances the agent by one step. Called automatically unless
 	// `process_callback` is `PROCESS_CALLBACK_MANUAL`.
@@ -124,3 +171,5 @@ public:
 };
 
 VARIANT_ENUM_CAST(GoapAgent::ProcessCallback);
+VARIANT_ENUM_CAST(GoapAgent::AbortReason);
+VARIANT_ENUM_CAST(GoapAgent::ActionResult);

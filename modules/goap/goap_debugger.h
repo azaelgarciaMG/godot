@@ -1,5 +1,5 @@
 /**************************************************************************/
-/*  goap_plan.h                                                           */
+/*  goap_debugger.h                                                       */
 /**************************************************************************/
 /*                         This file is part of:                          */
 /*                             GODOT ENGINE                               */
@@ -30,49 +30,73 @@
 
 #pragma once
 
-#include "goap_action.h"
-#include "goap_goal.h"
+#include "core/debugger/engine_profiler.h"
+#include "core/object/object_id.h"
+#include "core/templates/hash_set.h"
+#include "core/variant/dictionary.h"
 
-#include "core/object/ref_counted.h"
-#include "core/variant/typed_array.h"
+class GoapAgent;
 
-// The ordered list of actions GoapPlanner found for a goal, plus a cursor
-// tracking how far the agent has executed it.
-class GoapPlan : public RefCounted {
-	GDCLASS(GoapPlan, RefCounted);
+// Runtime half of the GOAP debugger. Every GoapAgent announces itself while it
+// is in the tree, and once the editor turns the "goap" profiler on, a snapshot
+// of all of them is pushed across the debugger connection a few times a second.
+//
+// Nothing here runs unless the editor asks for it: with the profiler off the
+// per-frame tick only accumulates a timer.
+class GoapDebugger {
+public:
+	// One agent as the editor panel sees it.
+	struct AgentInfo {
+		String path;
+		bool active = false;
+		bool idle = false;
+		bool planning = false;
+		String goal;
+		PackedStringArray plan;
+		int cursor = 0;
+		double plan_cost = 0.0;
+		int last_result = 0;
+		int last_iterations = 0;
+		Dictionary world_state;
 
-	Ref<GoapGoal> goal;
-	Vector<Ref<GoapAction>> actions;
-	double total_cost = 0.0;
-	int cursor = 0;
+		void write_to_array(Array &r_arr) const;
+		bool read_from_array(const Array &p_arr, int p_offset);
 
-protected:
-	static void _bind_methods();
+		// Number of array entries one agent occupies.
+		static constexpr int FIELD_COUNT = 11;
+	};
 
-	// Renders the goal, the cost and the action list, marking the action the
-	// cursor is on with a `*`. Makes `print(plan)` useful for debugging.
-	virtual String _to_string() override;
+	struct AgentFrame {
+		Vector<AgentInfo> infos;
+
+		Array serialize() const;
+		bool deserialize(const Array &p_array);
+	};
+
+private:
+	class AgentProfiler : public EngineProfiler {
+		GDSOFTCLASS(AgentProfiler, EngineProfiler);
+
+		bool enabled = false;
+		double interval = 0.25;
+		double elapsed = 0.0;
+
+	public:
+		void toggle(bool p_enable, const Array &p_opts) override;
+		void tick(double p_frame_time, double p_process_time, double p_physics_time, double p_physics_frame_time) override;
+	};
+
+	static HashSet<ObjectID> agents;
 
 public:
-	void set_goal(const Ref<GoapGoal> &p_goal) { goal = p_goal; }
-	Ref<GoapGoal> get_goal() const { return goal; }
+	static void initialize();
+	static void deinitialize();
 
-	void set_actions(const Vector<Ref<GoapAction>> &p_actions);
-	const Vector<Ref<GoapAction>> &get_action_list() const { return actions; }
-	TypedArray<GoapAction> get_actions() const;
-	void set_actions_typed(const TypedArray<GoapAction> &p_actions);
+	// Called by GoapAgent as it enters and leaves the tree. Cheap enough to run
+	// unconditionally; the set is only read when a snapshot is requested.
+	static void register_agent(GoapAgent *p_agent);
+	static void unregister_agent(GoapAgent *p_agent);
 
-	void set_total_cost(double p_cost) { total_cost = p_cost; }
-	double get_total_cost() const { return total_cost; }
-
-	int get_action_count() const { return actions.size(); }
-	Ref<GoapAction> get_action(int p_index) const;
-
-	// Execution cursor.
-	Ref<GoapAction> get_current_action() const;
-	int get_cursor() const { return cursor; }
-	void advance();
-	void reset() { cursor = 0; }
-	bool is_finished() const { return cursor >= actions.size(); }
-	bool is_empty() const { return actions.is_empty(); }
+	// Collects every live agent and sends it to the editor.
+	static void send_snapshot();
 };
