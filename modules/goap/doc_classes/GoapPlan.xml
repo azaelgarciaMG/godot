@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="GoapPlan" inherits="RefCounted" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		An ordered list of actions that reaches a [GoapGoal].
+	</brief_description>
+	<description>
+		What [GoapPlanner] produces and [GoapAgent] executes: the actions to run, in order, plus a cursor tracking how far along the agent is.
+		Plans are snapshots. They are built from the world state as it was at planning time, which is why the agent re-checks each action's preconditions before starting it and drops the plan when they no longer hold.
+		[codeblock]
+		func _on_plan_found(plan):
+		    var steps = []
+		    for action in plan.actions:
+		        steps.append(action.action_name)
+		    print("%s: %s (cost %.1f)" % [plan.goal.goal_name, steps, plan.total_cost])
+		[/codeblock]
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="advance">
+			<return type="void" />
+			<description>
+				Moves the cursor to the next action. Does nothing once the plan is finished.
+			</description>
+		</method>
+		<method name="get_action" qualifiers="const">
+			<return type="GoapAction" />
+			<param index="0" name="index" type="int" />
+			<description>
+				Returns the action at [param index], in execution order.
+			</description>
+		</method>
+		<method name="get_action_count" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of actions in the plan.
+			</description>
+		</method>
+		<method name="get_current_action" qualifiers="const">
+			<return type="GoapAction" />
+			<description>
+				Returns the action the cursor points at, or [code]null[/code] if the plan is finished.
+			</description>
+		</method>
+		<method name="get_cursor" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns how many actions have been completed so far.
+			</description>
+		</method>
+		<method name="is_empty" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if the plan holds no actions. [method GoapPlanner.plan_for_goal] returns such a plan when the goal is already satisfied.
+			</description>
+		</method>
+		<method name="is_finished" qualifiers="const">
+			<return type="bool" />
+			<description>
+				Returns [code]true[/code] if the cursor has passed the last action.
+			</description>
+		</method>
+		<method name="reset">
+			<return type="void" />
+			<description>
+				Moves the cursor back to the first action so the plan can be run again.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="actions" type="GoapAction[]" setter="set_actions" getter="get_actions" default="[]">
+			The actions to run, in execution order. Assigning a new array resets the cursor.
+		</member>
+		<member name="goal" type="GoapGoal" setter="set_goal" getter="get_goal">
+			The goal this plan was built for.
+		</member>
+		<member name="total_cost" type="float" setter="set_total_cost" getter="get_total_cost" default="0.0">
+			The sum of the costs of every action in the plan, as the planner evaluated them.
+		</member>
+	</members>
+</class>

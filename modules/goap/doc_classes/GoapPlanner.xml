@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="GoapPlanner" inherits="RefCounted" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		Searches for the cheapest sequence of actions that reaches a goal.
+	</brief_description>
+	<description>
+		The search runs [i]backwards[/i]: it starts from the goal's desired state and works towards the current world state, considering only actions that close a condition which is still open. That keeps the branching factor tied to the size of the goal rather than to the size of the action set, so adding actions an agent rarely needs costs little.
+		At each step an action is kept when it satisfies at least one open condition and undoes none of the others; what it provides is then struck from the open set and what it requires is added in its place. A plan is complete once every remaining condition already holds in the world state.
+		Each [GoapAgent] owns a planner, so there is usually no need to create one. Doing so is still useful to inspect what an agent would decide:
+		[codeblock]
+		var planner = GoapPlanner.new()
+		var plan = planner.plan(agent.context, agent.actions, agent.goals)
+		if plan == null:
+		    print("No reachable goal (%d/%d nodes explored)" % [planner.get_last_iterations(), planner.max_iterations])
+		[/codeblock]
+		[b]Note:[/b] Planning is synchronous. With the default limits it is cheap enough to run from [method Node._process], but a large action set combined with a distant goal can take long enough to matter; use [member GoapAgent.replan_delay] to control how often it happens.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="get_last_iterations" qualifiers="const">
+			<return type="int" />
+			<description>
+				Returns the number of search nodes the last query expanded. When it equals [member max_iterations], the search ran out of budget rather than proving the goal unreachable, and raising the limit may produce a plan.
+			</description>
+		</method>
+		<method name="plan">
+			<return type="GoapPlan" />
+			<param index="0" name="context" type="GoapContext" />
+			<param index="1" name="actions" type="GoapAction[]" />
+			<param index="2" name="goals" type="GoapGoal[]" />
+			<description>
+				Returns a plan for the highest priority goal that is valid, not yet satisfied and reachable, or [code]null[/code] when no goal qualifies.
+				Goals are tried from the highest [member GoapGoal.priority] down, ties being broken by their order in [param goals]. Goals that are already satisfied need no work and are passed over.
+			</description>
+		</method>
+		<method name="plan_for_goal">
+			<return type="GoapPlan" />
+			<param index="0" name="context" type="GoapContext" />
+			<param index="1" name="actions" type="GoapAction[]" />
+			<param index="2" name="goal" type="GoapGoal" />
+			<description>
+				Returns a plan for [param goal] alone, ignoring priorities. Returns [code]null[/code] when the goal cannot be reached, and a plan with no actions when it is already satisfied.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="max_iterations" type="int" setter="set_max_iterations" getter="get_max_iterations" default="1000">
+			How many search nodes a single query may expand before giving up. It bounds the time planning can take when a goal is unreachable through a large action set.
+		</member>
+		<member name="max_plan_length" type="int" setter="set_max_plan_length" getter="get_max_plan_length" default="16">
+			The longest chain of actions the planner will build. Plans much longer than a handful of steps tend to be invalidated by the world before they finish, so a low limit is usually the right call.
+		</member>
+	</members>
+</class>
