@@ -44,7 +44,7 @@ struct Triangle {
 	vec3 min_bounds;
 	uint cull_mode;
 	vec3 max_bounds;
-	uint pad1;
+	uint normal_oct;
 };
 
 struct ClusterAABB {
@@ -59,10 +59,14 @@ layout(set = 0, binding = 2, std430) restrict readonly buffer Triangles {
 }
 triangles;
 
+#ifndef USE_HW_RAYTRACING
+
 layout(set = 0, binding = 3, std430) restrict readonly buffer TriangleIndices {
 	uint data[];
 }
 triangle_indices;
+
+#endif
 
 #define LIGHT_TYPE_DIRECTIONAL 0
 #define LIGHT_TYPE_OMNI 1
@@ -114,13 +118,25 @@ layout(set = 0, binding = 6, std430) restrict readonly buffer Probes {
 }
 probe_positions;
 
+#ifndef USE_HW_RAYTRACING
+
 layout(set = 0, binding = 7) uniform utexture3D grid;
+
+#endif
 
 layout(set = 0, binding = 8) uniform texture2DArray albedo_tex;
 layout(set = 0, binding = 9) uniform texture2DArray emission_tex;
 
 layout(set = 0, binding = 10) uniform sampler linear_sampler;
 layout(set = 0, binding = 11) uniform sampler area_light_atlas_sampler;
+
+#ifdef USE_HW_RAYTRACING
+
+// The scene is traced against a hardware acceleration structure holding a single instance whose
+// primitive indices map one to one onto the entries of the triangle buffer above.
+layout(set = 0, binding = 14) uniform accelerationStructureEXT scene_tlas;
+
+#else
 
 layout(set = 0, binding = 12, std430) restrict readonly buffer ClusterIndices {
 	uint data[];
@@ -131,6 +147,8 @@ layout(set = 0, binding = 13, std430) restrict readonly buffer ClusterAABBs {
 	ClusterAABB data[];
 }
 cluster_aabbs;
+
+#endif
 
 // Fragment action constants
 const uint FA_NONE = 0;

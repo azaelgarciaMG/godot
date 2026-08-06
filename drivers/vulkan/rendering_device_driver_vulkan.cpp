@@ -584,6 +584,7 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
 	_register_requested_device_extension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, false);
+	_register_requested_device_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_NV_RAY_TRACING_VALIDATION_EXTENSION_NAME, false);
 	_register_requested_device_extension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME, false);
 
@@ -914,6 +915,7 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 		VkPhysicalDeviceVulkanMemoryModelFeatures memory_model_features = {};
 		VkPhysicalDeviceAccelerationStructureFeaturesKHR acceleration_structure_features = {};
 		VkPhysicalDeviceRayTracingPipelineFeaturesKHR raytracing_pipeline_features = {};
+		VkPhysicalDeviceRayQueryFeaturesKHR ray_query_features = {};
 		VkPhysicalDeviceSynchronization2FeaturesKHR sync_2_features = {};
 		VkPhysicalDeviceRayTracingValidationFeaturesNV raytracing_validation_features = {};
 
@@ -992,6 +994,12 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 			raytracing_pipeline_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
 			raytracing_pipeline_features.pNext = next_features;
 			next_features = &raytracing_pipeline_features;
+		}
+
+		if (enabled_device_extension_names.has(VK_KHR_RAY_QUERY_EXTENSION_NAME)) {
+			ray_query_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+			ray_query_features.pNext = next_features;
+			next_features = &ray_query_features;
 		}
 
 		if (enabled_device_extension_names.has(VK_NV_RAY_TRACING_VALIDATION_EXTENSION_NAME)) {
@@ -1093,6 +1101,10 @@ Error RenderingDeviceDriverVulkan::_check_device_capabilities() {
 		if (enabled_device_extension_names.has(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME)) {
 			raytracing_capabilities.raytracing_pipeline_support = raytracing_pipeline_features.rayTracingPipeline;
 			raytracing_capabilities.validation = raytracing_validation_features.rayTracingValidation;
+		}
+
+		if (enabled_device_extension_names.has(VK_KHR_RAY_QUERY_EXTENSION_NAME)) {
+			ray_query_support = ray_query_features.rayQuery;
 		}
 	}
 
@@ -1431,6 +1443,14 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
 		raytracing_pipeline_features.pNext = create_info_next;
 		raytracing_pipeline_features.rayTracingPipeline = raytracing_capabilities.raytracing_pipeline_support;
 		create_info_next = &raytracing_pipeline_features;
+	}
+
+	VkPhysicalDeviceRayQueryFeaturesKHR ray_query_features = {};
+	if (ray_query_support) {
+		ray_query_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+		ray_query_features.pNext = create_info_next;
+		ray_query_features.rayQuery = ray_query_support;
+		create_info_next = &ray_query_features;
 	}
 
 	VkPhysicalDeviceRayTracingValidationFeaturesNV raytracing_validation_features = {};

@@ -5,7 +5,7 @@ triangles = "#define MODE_TRIANGLES";
 
 #[vertex]
 
-#version 450
+#version 460
 
 #VERSION_DEFINES
 
@@ -72,7 +72,7 @@ void main() {
 
 #[fragment]
 
-#version 450
+#version 460
 
 #VERSION_DEFINES
 

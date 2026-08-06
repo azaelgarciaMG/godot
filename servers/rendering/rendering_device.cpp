@@ -543,7 +543,12 @@ Error RenderingDevice::tlas_build(RID p_tlas, Span<AccelerationStructureInstance
 		rdd_instance.flags = rd_instance.flags;
 
 		if (rd_instance.blas.is_valid()) {
-			ERR_FAIL_COND_V_MSG(!rd_instance.hit_sbt_range, ERR_INVALID_PARAMETER, "Instance " + itos(i) + " has an invalid hit shader binding table range.");
+			// A zero range means the instance references no hit groups at all, which is what an
+			// acceleration structure only ever traced with rayQueryEXT wants: ray queries do not
+			// dispatch hit shaders and have no shader binding table to point into. Anything else has
+			// to come from hit_sbt_range_alloc(), which reports failure as a negative range, so this
+			// still catches a range that was never successfully allocated.
+			ERR_FAIL_COND_V_MSG(rd_instance.hit_sbt_range < 0, ERR_INVALID_PARAMETER, "Instance " + itos(i) + " has an invalid hit shader binding table range. Use 0 for an instance that references no hit groups.");
 
 			AccelerationStructure *blas = acceleration_structure_owner.get_or_null(rd_instance.blas);
 			ERR_FAIL_NULL_V(blas, ERR_INVALID_PARAMETER);
@@ -703,11 +708,13 @@ Error RenderingDevice::hit_sbt_set_pipeline(RID p_hit_sbt, RID p_raytracing_pipe
 }
 
 RD::HitShaderBindingTableRange RenderingDevice::hit_sbt_range_alloc(RID p_hit_sbt, uint32_t p_hit_group_count) {
-	ERR_RENDER_THREAD_GUARD_V(ERR_UNAVAILABLE);
+	ERR_RENDER_THREAD_GUARD_V(-1);
 
+	// A negative range is the failure value. Zero cannot serve as one: it is the legal range of an
+	// instance that references no hit groups, which is how ray query only structures are built.
 	HitShaderBindingTable *hit_sbt = hit_sbt_owner.get_or_null(p_hit_sbt);
-	ERR_FAIL_NULL_V(hit_sbt, RD::HitShaderBindingTableRange());
-	ERR_FAIL_COND_V(p_hit_group_count == 0, RD::HitShaderBindingTableRange());
+	ERR_FAIL_NULL_V(hit_sbt, -1);
+	ERR_FAIL_COND_V(p_hit_group_count == 0, -1);
 
 	uint32_t offset;
 
@@ -751,7 +758,9 @@ Error RenderingDevice::hit_sbt_range_free(RID p_hit_sbt, HitShaderBindingTableRa
 
 	HitShaderBindingTable *hit_sbt = hit_sbt_owner.get_or_null(p_hit_sbt);
 	ERR_FAIL_NULL_V(hit_sbt, ERR_INVALID_PARAMETER);
-	ERR_FAIL_COND_V(!p_range, ERR_INVALID_PARAMETER);
+	// Both a failed allocation and the empty range of a ray query only instance are rejected here:
+	// neither owns any hit group to free or write to.
+	ERR_FAIL_COND_V(p_range <= 0, ERR_INVALID_PARAMETER);
 
 	uint32_t offset = _decode_hit_sbt_range_offset(p_range);
 	uint32_t count = _decode_hit_sbt_range_count(p_range);
@@ -814,7 +823,9 @@ Error RenderingDevice::hit_sbt_range_update(RID p_hit_sbt, HitShaderBindingTable
 
 	HitShaderBindingTable *hit_sbt = hit_sbt_owner.get_or_null(p_hit_sbt);
 	ERR_FAIL_NULL_V(hit_sbt, ERR_INVALID_PARAMETER);
-	ERR_FAIL_COND_V(!p_range, ERR_INVALID_PARAMETER);
+	// Both a failed allocation and the empty range of a ray query only instance are rejected here:
+	// neither owns any hit group to free or write to.
+	ERR_FAIL_COND_V(p_range <= 0, ERR_INVALID_PARAMETER);
 
 	uint32_t offset = _decode_hit_sbt_range_offset(p_range);
 	uint32_t count = _decode_hit_sbt_range_count(p_range);

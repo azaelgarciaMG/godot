@@ -199,7 +199,12 @@ class LightmapperRD : public Lightmapper {
 		float min_bounds[3] = {};
 		uint32_t cull_mode = 0;
 		float max_bounds[3] = {};
-		float pad1 = 0.0;
+		// Octahedron-encoded geometric normal, in the same 16:16 packing the rest of the engine uses.
+		// The hardware tracer needs the face normal on every hit to tell front faces from back ones,
+		// and pulling it from here costs one read out of a struct the hit already touches, instead of
+		// three scattered reads into the vertex array. Unused by the grid tracer, which computes the
+		// normal from the vertices it has to load for the intersection test anyway.
+		uint32_t normal_oct = 0;
 		bool operator<(const Triangle &p_triangle) const {
 			return slice < p_triangle.slice;
 		}
@@ -242,6 +247,20 @@ class LightmapperRD : public Lightmapper {
 
 	void _plot_triangle_into_triangle_index_list(int p_size, const Vector3i &p_ofs, const AABB &p_bounds, const Vector3 p_points[3], uint32_t p_triangle_index, LocalVector<TriangleSort> &triangles, uint32_t p_grid_size);
 	void _sort_triangle_clusters(uint32_t p_cluster_size, uint32_t p_cluster_index, uint32_t p_index_start, uint32_t p_count, LocalVector<TriangleSort> &p_triangle_sort, LocalVector<ClusterAABB> &p_cluster_aabb);
+
+	// Resources backing hardware ray tracing. Only created when the device supports ray queries.
+	// The vertex data is not among them: the build reads the buffer the shaders already bind, which
+	// is created with the extra usage bits it needs when this path is taken.
+	struct RaytracingStructures {
+		RID index_buffer;
+		RID blas;
+		RID tlas;
+		// Set only once every structure has been created *and* built. The RIDs go valid before the
+		// builds are recorded, so they can't stand in for success on their own.
+		bool built = false;
+	};
+
+	bool _build_raytracing_structures(RenderingDevice *p_rd, RID p_vertex_buffer, uint32_t p_vertex_count, const LocalVector<Triangle> &p_triangles, RaytracingStructures &r_structures);
 
 	struct RasterPushConstant {
 		float atlas_size[2] = {};
@@ -295,7 +314,7 @@ class LightmapperRD : public Lightmapper {
 	};
 
 	BakeError _blit_meshes_into_atlas(int p_max_texture_size, int p_denoiser_range, Vector<Ref<Image>> &albedo_images, Vector<Ref<Image>> &emission_images, AABB &bounds, Size2i &atlas_size, int &atlas_slices, float p_supersampling_factor, BakeStepFunc p_step_function, void *p_bake_userdata);
-	void _create_acceleration_structures(RenderingDevice *rd, Size2i atlas_size, int atlas_slices, AABB &bounds, int grid_size, uint32_t p_cluster_size, Vector<Probe> &probe_positions, GenerateProbes p_generate_probes, Vector<int> &slice_triangle_count, Vector<int> &slice_seam_count, RID &vertex_buffer, RID &triangle_buffer, RID &lights_buffer, RID &r_triangle_indices_buffer, RID &r_cluster_indices_buffer, RID &r_cluster_aabbs_buffer, RID &probe_positions_buffer, RID &grid_texture, RID &seams_buffer, BakeStepFunc p_step_function, void *p_bake_userdata);
+	void _create_acceleration_structures(RenderingDevice *rd, Size2i atlas_size, int atlas_slices, AABB &bounds, int grid_size, uint32_t p_cluster_size, Vector<Probe> &probe_positions, GenerateProbes p_generate_probes, Vector<int> &slice_triangle_count, Vector<int> &slice_seam_count, RID &vertex_buffer, RID &triangle_buffer, RID &lights_buffer, RID &r_triangle_indices_buffer, RID &r_cluster_indices_buffer, RID &r_cluster_aabbs_buffer, RID &probe_positions_buffer, RID &grid_texture, RID &seams_buffer, bool p_use_raytracing, RaytracingStructures &r_raytracing, BakeStepFunc p_step_function, void *p_bake_userdata);
 	void _raster_geometry(RenderingDevice *rd, Size2i atlas_size, int atlas_slices, int grid_size, AABB bounds, float p_bias, Vector<int> slice_triangle_count, RID position_tex, RID unocclude_tex, RID normal_tex, RID raster_depth_buffer, RID rasterize_shader, RID raster_base_uniform);
 
 	BakeError _dilate(RenderingDevice *rd, Ref<RDShaderFile> &compute_shader, RID &compute_base_uniform_set, PushConstant &push_constant, RID &source_light_tex, RID &dest_light_tex, const Size2i &atlas_size, int atlas_slices);

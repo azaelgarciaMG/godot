@@ -1378,7 +1378,10 @@ public:
 		Transform3D transform;
 		uint32_t id = 0;
 		uint8_t mask = 0xFF;
-		HitShaderBindingTableRange hit_sbt_range = 0;
+		// Negative means unset, so a forgotten assignment is still caught. Zero is the legal range of
+		// an instance that references no hit groups, which is what a structure traced only with ray
+		// queries wants. Anything else comes from hit_sbt_range_alloc().
+		HitShaderBindingTableRange hit_sbt_range = -1;
 		BitField<AccelerationStructureInstanceFlagBits> flags = {};
 		RID blas;
 	};

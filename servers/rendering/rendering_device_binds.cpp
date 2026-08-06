@@ -179,7 +179,9 @@ Error RDShaderFile::parse_versions_from_text(const String &p_text, const String 
 		}
 
 		if (version_texts.is_empty()) {
-			version_texts[""] = ""; //make sure a default version exists
+			// Make sure a default version exists. It still has to carry the caller's defines, which
+			// are otherwise silently dropped for any shader that declares no #[versions] block.
+			version_texts[""] = p_defines;
 		}
 
 		bool errors_found = false;

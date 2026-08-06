@@ -5779,10 +5779,10 @@ void DisplayServerX11::_update_context(WindowData &wd) {
 		CharString name_str;
 		switch (context) {
 			case DisplayServerEnums::CONTEXT_EDITOR:
-				name_str = "Godot_Editor";
+				name_str = "Godot-Tsalal_Editor";
 				break;
 			case DisplayServerEnums::CONTEXT_PROJECTMAN:
-				name_str = "Godot_ProjectList";
+				name_str = "Godot-Tsalal_ProjectList";
 				break;
 			case DisplayServerEnums::CONTEXT_ENGINE:
 				name_str = "Godot_Engine";
@@ -5798,7 +5798,7 @@ void DisplayServerX11::_update_context(WindowData &wd) {
 				class_str = config_name.utf8();
 			}
 		} else {
-			class_str = "Godot";
+			class_str = "Godot-Tsalal";
 		}
 
 		classHint->res_class = class_str.ptrw();
