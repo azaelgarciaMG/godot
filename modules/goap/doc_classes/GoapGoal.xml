@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="GoapGoal" inherits="Resource" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		A world state a [GoapAgent] wants to bring about.
+	</brief_description>
+	<description>
+		A goal states [i]what[/i] the agent wants, never [i]how[/i] to get it; finding the how is [GoapPlanner]'s job. Give an agent a handful of goals and it will pursue the highest priority one it can currently build a plan for.
+		[codeblock]
+		extends GoapGoal
+
+		func _init():
+		    goal_name = &amp;"stay_alive"
+		    desired_state = {&amp;"is_safe": true}
+
+		func _get_priority(context):
+		    # Outranks everything else once wounded.
+		    return 100.0 if context.get_state(&amp;"health", 100) &lt; 30 else 1.0
+		[/codeblock]
+		Goals that are already satisfied are skipped, so the agent falls through to the next one instead of idling. A low priority goal with an easily satisfied state, such as [code]{&amp;"is_idle": true}[/code], makes a good fallback.
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="_get_desired_state" qualifiers="virtual const">
+			<return type="Dictionary" />
+			<param index="0" name="context" type="GoapContext" />
+			<description>
+				Called during planning to replace [member desired_state] with a dictionary computed from the current situation, for instance a goal that targets whichever enemy is closest.
+			</description>
+		</method>
+		<method name="_get_priority" qualifiers="virtual const">
+			<return type="float" />
+			<param index="0" name="context" type="GoapContext" />
+			<description>
+				Called during planning to replace [member priority] with a value computed from the current situation. This is the usual way to let urgent goals take over.
+			</description>
+		</method>
+		<method name="_is_valid" qualifiers="virtual const">
+			<return type="bool" />
+			<param index="0" name="context" type="GoapContext" />
+			<description>
+				Called during planning to decide whether this goal should be considered at all. A goal that is not valid is skipped without being planned for.
+			</description>
+		</method>
+		<method name="get_effective_desired_state" qualifiers="const">
+			<return type="Dictionary" />
+			<param index="0" name="context" type="GoapContext" />
+			<description>
+				Returns the state the planner will aim for: the result of [method _get_desired_state] when it is overridden, otherwise [member desired_state].
+			</description>
+		</method>
+		<method name="get_effective_priority" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="context" type="GoapContext" />
+			<description>
+				Returns the priority the planner will rank this goal by: the result of [method _get_priority] when it is overridden, otherwise [member priority].
+			</description>
+		</method>
+		<method name="is_satisfied" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="world_state" type="Dictionary" />
+			<param index="1" name="context" type="GoapContext" default="null" />
+			<description>
+				Returns [code]true[/code] if every fact of the desired state already holds in [param world_state].
+			</description>
+		</method>
+		<method name="is_valid" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="context" type="GoapContext" />
+			<description>
+				Returns the result of [method _is_valid], or [code]true[/code] when it is not overridden.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="desired_state" type="Dictionary" setter="set_desired_state" getter="get_desired_state" default="{}">
+			The facts that must hold for this goal to be met, in the same vocabulary as [member GoapContext.world_state].
+			Every extra fact widens the search, so state the outcome and nothing more: prefer [code]{&amp;"has_wood": true}[/code] over spelling out each step that leads to it.
+		</member>
+		<member name="goal_name" type="StringName" setter="set_goal_name" getter="get_goal_name" default="&amp;&quot;&quot;">
+			A name used for debugging and for inspecting plans. It has no effect on planning.
+		</member>
+		<member name="priority" type="float" setter="set_priority" getter="get_priority" default="1.0">
+			How much this goal outranks the others. The planner tries goals from the highest priority down and keeps the first plan it finds, so a high priority goal that cannot be reached costs one failed search and then steps aside.
+		</member>
+	</members>
+</class>

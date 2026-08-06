@@ -1,0 +1,184 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="GoapAction" inherits="Resource" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		A single step a [GoapAgent] can take towards a [GoapGoal].
+	</brief_description>
+	<description>
+		An action is two things at once. To [GoapPlanner] it is pure data: a set of [member preconditions] that must hold before it can run, and a set of [member effects] the planner assumes will hold once it has. To [GoapAgent] it is behavior, run through [method _enter], [method _tick] and [method _exit].
+		Extend this class to write an action:
+		[codeblock]
+		extends GoapAction
+
+		func _init():
+		    action_name = &amp;"chop_wood"
+		    cost = 2.0
+		    preconditions = {&amp;"has_axe": true}
+		    effects = {&amp;"has_wood": true}
+
+		func _is_valid(context):
+		    return get_tree().get_first_node_in_group("trees") != null
+
+		func _tick(context, delta):
+		    if not context.agent.reached_target():
+		        return GoapAction.STATUS_RUNNING
+		    return GoapAction.STATUS_SUCCEEDED
+		[/codeblock]
+		An action without a [method _tick] override succeeds the moment it starts, which is useful for steps that only exist to move the world state forward.
+		Actions are resources with no per-agent state, so the same instance can be shared by every agent that knows how to perform it. Anything that varies between agents belongs in the [GoapContext].
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="_enter" qualifiers="virtual">
+			<return type="void" />
+			<param index="0" name="context" type="GoapContext" />
+			<description>
+				Called once when the agent starts this action, after its preconditions have been re-checked. Set up whatever [method _tick] needs here.
+			</description>
+		</method>
+		<method name="_exit" qualifiers="virtual">
+			<return type="void" />
+			<param index="0" name="context" type="GoapContext" />
+			<param index="1" name="succeeded" type="bool" />
+			<description>
+				Called once when the action stops, whether it succeeded, failed, or was interrupted by [method GoapAgent.abort_plan]. Always paired with a [method _enter] call, so it is the right place to release anything that was reserved there.
+			</description>
+		</method>
+		<method name="_get_cost" qualifiers="virtual const">
+			<return type="float" />
+			<param index="0" name="context" type="GoapContext" />
+			<description>
+				Called during planning to replace [member cost] with a value computed from the current situation, such as the distance to walk. Negative costs are clamped to [code]0.0[/code].
+				This runs once per planning query, not once per search step.
+			</description>
+		</method>
+		<method name="_get_effects" qualifiers="virtual const">
+			<return type="Dictionary" />
+			<param index="0" name="context" type="GoapContext" />
+			<description>
+				Called during planning to replace [member effects] with a dictionary computed from the current situation.
+			</description>
+		</method>
+		<method name="_get_preconditions" qualifiers="virtual const">
+			<return type="Dictionary" />
+			<param index="0" name="context" type="GoapContext" />
+			<description>
+				Called during planning to replace [member preconditions] with a dictionary computed from the current situation.
+			</description>
+		</method>
+		<method name="_is_valid" qualifiers="virtual const">
+			<return type="bool" />
+			<param index="0" name="context" type="GoapContext" />
+			<description>
+				Called during planning, and again right before the action starts, to decide whether it can be considered at all. Return [code]false[/code] for conditions that are awkward to express as facts, such as "a tree exists within range".
+				An action that is not valid is left out of the search entirely.
+			</description>
+		</method>
+		<method name="_tick" qualifiers="virtual">
+			<return type="int" />
+			<param index="0" name="context" type="GoapContext" />
+			<param index="1" name="delta" type="float" />
+			<description>
+				Called every frame while the action runs. Return one of [constant STATUS_RUNNING], [constant STATUS_SUCCEEDED] or [constant STATUS_FAILED].
+				Returning [constant STATUS_FAILED] aborts the whole plan and makes the agent plan again.
+			</description>
+		</method>
+		<method name="apply_effects" qualifiers="const">
+			<return type="Dictionary" />
+			<param index="0" name="world_state" type="Dictionary" />
+			<param index="1" name="context" type="GoapContext" default="null" />
+			<description>
+				Returns a copy of [param world_state] with this action's effects written into it. [param world_state] itself is left untouched.
+			</description>
+		</method>
+		<method name="check_preconditions" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="world_state" type="Dictionary" />
+			<param index="1" name="context" type="GoapContext" default="null" />
+			<description>
+				Returns [code]true[/code] if every precondition of this action holds in [param world_state].
+			</description>
+		</method>
+		<method name="enter">
+			<return type="void" />
+			<param index="0" name="context" type="GoapContext" />
+			<description>
+				Runs [method _enter]. Called by [GoapAgent]; only call it directly when driving actions yourself.
+			</description>
+		</method>
+		<method name="exit">
+			<return type="void" />
+			<param index="0" name="context" type="GoapContext" />
+			<param index="1" name="succeeded" type="bool" />
+			<description>
+				Runs [method _exit]. Called by [GoapAgent]; only call it directly when driving actions yourself.
+			</description>
+		</method>
+		<method name="get_effective_cost" qualifiers="const">
+			<return type="float" />
+			<param index="0" name="context" type="GoapContext" />
+			<description>
+				Returns the cost the planner will use: the result of [method _get_cost] when it is overridden, otherwise [member cost].
+			</description>
+		</method>
+		<method name="get_effective_effects" qualifiers="const">
+			<return type="Dictionary" />
+			<param index="0" name="context" type="GoapContext" />
+			<description>
+				Returns the effects the planner will use: the result of [method _get_effects] when it is overridden, otherwise [member effects].
+			</description>
+		</method>
+		<method name="get_effective_preconditions" qualifiers="const">
+			<return type="Dictionary" />
+			<param index="0" name="context" type="GoapContext" />
+			<description>
+				Returns the preconditions the planner will use: the result of [method _get_preconditions] when it is overridden, otherwise [member preconditions].
+			</description>
+		</method>
+		<method name="is_valid" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="context" type="GoapContext" />
+			<description>
+				Returns the result of [method _is_valid], or [code]true[/code] when it is not overridden.
+			</description>
+		</method>
+		<method name="tick">
+			<return type="int" enum="GoapAction.Status" />
+			<param index="0" name="context" type="GoapContext" />
+			<param index="1" name="delta" type="float" />
+			<description>
+				Runs [method _tick], returning [constant STATUS_SUCCEEDED] when it is not overridden. Called by [GoapAgent]; only call it directly when driving actions yourself.
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="action_name" type="StringName" setter="set_action_name" getter="get_action_name" default="&amp;&quot;&quot;">
+			A name used for debugging and for inspecting plans. It has no effect on planning.
+		</member>
+		<member name="auto_apply_effects" type="bool" setter="set_auto_apply_effects" getter="is_auto_apply_effects" default="true">
+			If [code]true[/code], [GoapAgent] writes this action's effects into [member GoapContext.world_state] as soon as it succeeds, so the world state follows the plan without extra bookkeeping.
+			Set it to [code]false[/code] when the facts are derived from the game itself, for instance from an inventory the action already updated, and let the action or a sensor set them instead.
+		</member>
+		<member name="cost" type="float" setter="set_cost" getter="get_cost" default="1.0">
+			What using this action costs the planner, in arbitrary units. Among the plans that reach a goal, the one with the lowest total cost is chosen. Negative values are clamped to [code]0.0[/code].
+			Costs below [code]1.0[/code] can make the planner explore more nodes than it strictly needs to; they remain correct, only slower.
+		</member>
+		<member name="effects" type="Dictionary" setter="set_effects" getter="get_effects" default="{}">
+			The facts the planner assumes will hold once this action has succeeded. An action with no effects is skipped, since it can never bring a goal closer.
+		</member>
+		<member name="preconditions" type="Dictionary" setter="set_preconditions" getter="get_preconditions" default="{}">
+			The facts that must hold in [member GoapContext.world_state] before this action can run. They are checked during planning and again just before the action starts, so a plan built a moment ago is never executed against a world that has changed underneath it.
+		</member>
+	</members>
+	<constants>
+		<constant name="STATUS_RUNNING" value="0" enum="Status">
+			The action needs more time; it will be ticked again next frame.
+		</constant>
+		<constant name="STATUS_SUCCEEDED" value="1" enum="Status">
+			The action is done. The agent applies its effects and moves to the next step of the plan.
+		</constant>
+		<constant name="STATUS_FAILED" value="2" enum="Status">
+			The action could not be completed. The agent drops the whole plan and starts over.
+		</constant>
+	</constants>
+</class>

@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<class name="GoapContext" inherits="RefCounted" api_type="core" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../../../doc/class.xsd">
+	<brief_description>
+		The data a [GoapAgent] reasons and acts on.
+	</brief_description>
+	<description>
+		Everything a [GoapAction] or a [GoapGoal] is allowed to know about the character it is working for. A context is passed to every virtual method of those resources, which lets a single action or goal resource be shared by any number of agents.
+		It holds two separate stores:
+		- [member world_state] contains the symbolic facts the planner compares. Keep it small and cheap: booleans, integers and strings. Every fact in it is a candidate for a precondition or an effect.
+		- [member blackboard] contains free-form runtime data, such as the node an action is walking towards. The planner never looks at it.
+		[codeblock]
+		func _enter(context):
+		    context.set_var(&amp;"target_tree", find_nearest_tree())
+
+		func _tick(context, delta):
+		    var tree = context.get_var(&amp;"target_tree")
+		    if context.agent.global_position.distance_to(tree.global_position) &lt; 1.0:
+		        context.set_state(&amp;"has_wood", true)
+		        return GoapAction.STATUS_SUCCEEDED
+		    return GoapAction.STATUS_RUNNING
+		[/codeblock]
+	</description>
+	<tutorials>
+	</tutorials>
+	<methods>
+		<method name="clear_state">
+			<return type="void" />
+			<description>
+				Removes every fact from [member world_state].
+			</description>
+		</method>
+		<method name="clear_vars">
+			<return type="void" />
+			<description>
+				Removes every entry from [member blackboard].
+			</description>
+		</method>
+		<method name="erase_state">
+			<return type="void" />
+			<param index="0" name="key" type="StringName" />
+			<description>
+				Removes the fact [param key] from [member world_state]. A missing fact is not the same as a [code]false[/code] one: preconditions asking for it will never be satisfied, but nothing will report a contradiction either.
+			</description>
+		</method>
+		<method name="erase_var">
+			<return type="void" />
+			<param index="0" name="key" type="StringName" />
+			<description>
+				Removes [param key] from [member blackboard].
+			</description>
+		</method>
+		<method name="get_state" qualifiers="const">
+			<return type="Variant" />
+			<param index="0" name="key" type="StringName" />
+			<param index="1" name="default" type="Variant" default="null" />
+			<description>
+				Returns the value of the fact [param key] in [member world_state], or [param default] if it is not set.
+			</description>
+		</method>
+		<method name="get_var" qualifiers="const">
+			<return type="Variant" />
+			<param index="0" name="key" type="StringName" />
+			<param index="1" name="default" type="Variant" default="null" />
+			<description>
+				Returns the value stored under [param key] in [member blackboard], or [param default] if it is not set.
+			</description>
+		</method>
+		<method name="has_state" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="key" type="StringName" />
+			<description>
+				Returns [code]true[/code] if the fact [param key] is present in [member world_state], whatever its value.
+			</description>
+		</method>
+		<method name="has_var" qualifiers="const">
+			<return type="bool" />
+			<param index="0" name="key" type="StringName" />
+			<description>
+				Returns [code]true[/code] if [param key] is present in [member blackboard].
+			</description>
+		</method>
+		<method name="set_state">
+			<return type="void" />
+			<param index="0" name="key" type="StringName" />
+			<param index="1" name="value" type="Variant" />
+			<description>
+				Sets the fact [param key] in [member world_state] to [param value]. Changing a fact does not interrupt the running plan; call [method GoapAgent.request_plan] if the change should force the agent to reconsider immediately.
+			</description>
+		</method>
+		<method name="set_var">
+			<return type="void" />
+			<param index="0" name="key" type="StringName" />
+			<param index="1" name="value" type="Variant" />
+			<description>
+				Stores [param value] under [param key] in [member blackboard].
+			</description>
+		</method>
+	</methods>
+	<members>
+		<member name="agent" type="Node" setter="set_agent" getter="get_agent">
+			The [GoapAgent] this context belongs to, or [code]null[/code] when planning without one. It is typed as [Node] so that actions can reach the character the agent is attached to.
+			The agent sets this on itself; there is rarely a reason to assign it manually.
+		</member>
+		<member name="blackboard" type="Dictionary" setter="set_blackboard" getter="get_blackboard" default="{}">
+			Free-form runtime data shared between the actions of one agent. Unlike [member world_state], nothing in here takes part in planning, so it can hold node references, vectors, timers or anything else.
+		</member>
+		<member name="world_state" type="Dictionary" setter="set_world_state" getter="get_world_state" default="{}">
+			The symbolic facts the planner searches over, as a dictionary of [StringName] keys to comparable values.
+			Values are compared by equality, with numbers matching across [int] and [float]. Keeping the vocabulary small directly shrinks the planner's search space.
+		</member>
+	</members>
+</class>
