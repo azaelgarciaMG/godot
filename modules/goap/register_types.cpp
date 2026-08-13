@@ -32,43 +32,22 @@
 
 #include "goap_action.h"
 #include "goap_agent.h"
-#include "goap_context.h"
-#include "goap_debugger.h"
 #include "goap_goal.h"
-#include "goap_plan.h"
-#include "goap_planner.h"
 
 #include "core/object/class_db.h"
 
-#ifdef TOOLS_ENABLED
-#include "editor/goap_debugger_plugin.h"
-#endif
-
 void initialize_goap_module(ModuleInitializationLevel p_level) {
-#ifdef TOOLS_ENABLED
-	if (p_level == MODULE_INITIALIZATION_LEVEL_EDITOR) {
-		EditorPlugins::add_by_type<GoapEditorPlugin>();
-		return;
-	}
-#endif
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
 	}
 
-	GDREGISTER_CLASS(GoapContext);
+	GDREGISTER_CLASS(GoapAgent);
 	GDREGISTER_CLASS(GoapAction);
 	GDREGISTER_CLASS(GoapGoal);
-	GDREGISTER_CLASS(GoapPlan);
-	GDREGISTER_CLASS(GoapPlanner);
-	GDREGISTER_CLASS(GoapAgent);
-
-	GoapDebugger::initialize();
 }
 
 void uninitialize_goap_module(ModuleInitializationLevel p_level) {
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
 	}
-
-	GoapDebugger::deinitialize();
 }

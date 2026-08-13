@@ -7,14 +7,7 @@ def configure(env):
 
 
 def get_doc_classes():
-    return [
-        "GoapAction",
-        "GoapAgent",
-        "GoapContext",
-        "GoapGoal",
-        "GoapPlan",
-        "GoapPlanner",
-    ]
+    return []
 
 
 def get_doc_path():
